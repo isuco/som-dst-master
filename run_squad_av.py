@@ -1090,11 +1090,17 @@ def main():
                                                                                                                 max(gen_acc,best_score['gen_acc']),
                                                                                                                 max(op_acc,best_score['op_acc']),max(op_F1,best_score['op_F1'])))
                     model_to_save = model.module if hasattr(model, 'module') else model
-                    if op_F1 > best_score['op_F1']:
+                    if turn==1 or turn==0:
+                        isbest=op_F1>best_score['op_F1']
+                        saved_name='model_best_turn'+str(turn)+'.bin'
+                    else:
+                        isbest=gen_acc>best_score['gen_acc']
+                        saved_name='model_best_generate.bin'
+                    if isbest:
                         best_score['op_acc'] = op_acc
                         best_score['gen_acc'] = gen_acc
                         best_score['op_F1'] = op_F1
-                        save_path = os.path.join(args.save_dir, 'model_best_generate.bin')
+                        save_path = os.path.join(args.save_dir, saved_name)
                         params={
                             'model':model_to_save.state_dict(),
                             'optimizer':enc_optimizer.state_dict(),
