@@ -45,7 +45,7 @@ def map_state_to_ids(slot_state,slot_meta,slot_ans):
     return slot_ans_idx
 
 def make_turn_label(slot_meta, last_dialog_state, turn_dialog_state,
-                    tokenizer, slot_ans=None,op_code='4', dynamic=False):
+                    tokenizer, slot_ans=None,op_code='4', dynamic=False,turn=0):
     if dynamic:
         gold_state = turn_dialog_state
         turn_dialog_state = {}
@@ -97,9 +97,10 @@ def make_turn_label(slot_meta, last_dialog_state, turn_dialog_state,
                 op_labels[idx]='carryover'
         except ValueError:
             continue
-    # for i,val in enumerate(slot_ans_idx):
-    #     if val==-1:
-    #         slot_ans_idx[i]=len(slot_ans[slot_meta[i]])-2
+    if turn==1 or turn==2:
+        for i,val in enumerate(slot_ans_idx):
+            if val==-1:
+                slot_ans_idx[i]=len(slot_ans[slot_meta[i]])-2
     for k, v in last_dialog_state.items():
         vv = turn_dialog_state.get(k)
         try:
@@ -209,6 +210,7 @@ global_diag_level=None
 global_op_code=None
 global_pred_op=None
 global_isfilter=False
+global_tur=0
 # def map_state_to_id(slot_state,slot_meta,slot_ans):
 #     slot_idx=[-1]*len(slot_state)
 #     keys=slot_state.keys()
@@ -231,7 +233,7 @@ def process_dial_dict(dial_dict):
     #     if domain not in domain_counter.keys():
     #         domain_counter[domain] = 0
     #     domain_counter[domain] += 1
-    global global_max_seq_length, global_op_code, global_tokenizer, global_slot_ans, global_slot_ans, global_slot_meta, global_n_history, global_diag_level,global_pred_op,global_isfilter
+    global global_max_seq_length, global_op_code, global_tokenizer, global_slot_ans, global_slot_ans, global_slot_meta, global_n_history, global_diag_level,global_pred_op,global_isfilter,global_turn
     dialog_history = []
     last_dialog_state = {}
     last_uttr = ""
@@ -264,6 +266,7 @@ def process_dial_dict(dial_dict):
                                                                                         global_tokenizer,
                                                                                         slot_ans=global_slot_ans,
                                                                                         op_code=global_op_code,
+                                                                                        turn=global_turn,
                                                                         dynamic=False)
         if (ti + 1) == len(dial_dict["dialogue"]):
             is_last_turn = True
@@ -296,8 +299,8 @@ def process_dial_dict(dial_dict):
 
 
 def prepare_dataset(data_path, tokenizer, slot_meta,
-                    n_history, max_seq_length, slot_ans=None,diag_level=False, op_code='4',op_data_path=None,isfilter=True):
-    global global_max_seq_length,global_op_code,global_tokenizer,global_slot_ans,global_slot_ans,global_slot_meta,global_n_history,global_diag_level,global_pred_op,global_isfilter
+                    n_history, max_seq_length, slot_ans=None,diag_level=False, op_code='4',op_data_path=None,isfilter=True,turn=0):
+    global global_max_seq_length,global_op_code,global_tokenizer,global_slot_ans,global_slot_ans,global_slot_meta,global_n_history,global_diag_level,global_pred_op,global_isfilter,global_turn
     global_tokenizer=tokenizer
     global_diag_level=diag_level
     global_max_seq_length=max_seq_length
@@ -306,6 +309,7 @@ def prepare_dataset(data_path, tokenizer, slot_meta,
     global_slot_meta=slot_meta
     global_slot_ans=slot_ans
     global_isfilter=isfilter
+    global_turn=turn
     if op_data_path is not None:
         with open(op_data_path,'r') as f:
             global_pred_op=json.load(f)
@@ -319,7 +323,7 @@ def prepare_dataset(data_path, tokenizer, slot_meta,
     #     lack_answer=json.load(f)
     # lack_answer=[tokenizer.convert_ids_to_tokens(ans) for ans in lack_answer]
     span_masks = []
-    dials = json.load(open(data_path))[:10]
+    dials = json.load(open(data_path))
     with fu.ProcessPoolExecutor() as excutor:
         datas=list(excutor.map(process_dial_dict, dials))
     data=reduce(lambda x,y:x+y,datas)
@@ -395,7 +399,7 @@ class TrainingInstance:
 
 
     def make_instance(self, tokenizer,lack_ans=[],max_seq_length=None,
-                      word_dropout=0., slot_token='[SLOT]'):
+                      word_dropout=0., slot_token='[SLOT]',turn=0):
         if max_seq_length is None:
             max_seq_length = self.max_seq_length
         state = []
@@ -412,36 +416,40 @@ class TrainingInstance:
             state.extend(t)
 
         #only use present utter
+
         avail_length_1 = max_seq_length - len(state) - 3
-        diag_1 = tokenizer.tokenize(self.dialog_history)
 
-        diag_2 = tokenizer.tokenize(self.turn_utter)
-        avail_length = avail_length_1 - len(diag_2)
+        if turn == 0 or turn == 1:
 
-        if len(diag_1) > avail_length:  # truncated
-            avail_length = len(diag_1) - avail_length
-            diag_1 = diag_1[avail_length:]
+            diag_2 = tokenizer.tokenize(self.turn_utter)
 
-        if len(diag_1) == 0 and len(diag_2) > avail_length_1:
-            avail_length = len(diag_2) - avail_length_1
-            diag_2 = diag_2[avail_length:]
 
-        if len(diag_2) > avail_length_1:
-            avail_length = len(diag_2) - avail_length_1
-            diag_2 = diag_2[avail_length:]
+            if len(diag_2) > avail_length_1:
+                avail_length = len(diag_2) - avail_length_1
+                diag_2 = diag_2[avail_length:]
+            drop_mask = [0] + [1] * len(diag_2) + [0]
+            diag_2 = ["CLS"] + diag_2 + ["[SEP]"]
+            segment = [0] * len(diag_2)
+            diag = diag_2
+        else:
+            diag_1 = tokenizer.tokenize(self.dialog_history)
+            diag_2 = tokenizer.tokenize(self.turn_utter)
+            avail_length = avail_length_1 - len(diag_2)
 
-        drop_mask = [0] + [1] * len(diag_1) + [0] + [1] * len(diag_2) + [0]
-        diag_1 = ["[CLS]"] + diag_1 + ["[SEP]"]
+            if len(diag_1) > avail_length:  # truncated
+                avail_length = len(diag_1) - avail_length
+                diag_1 = diag_1[avail_length:]
 
-        # drop_mask = [0] + [1] * len(diag_2) + [0]
-        # diag_2 = ["CLS"]+diag_2 + ["[SEP]"]
-        diag_2= diag_2 + ["[SEP]"]
-        segment=[0] * len(diag_1) + [1] * len(diag_2)
-        # segment = [0] * len(diag_2)
+            if len(diag_1) == 0 and len(diag_2) > avail_length_1:
+                avail_length = len(diag_2) - avail_length_1
+                diag_2 = diag_2[avail_length:]
+            drop_mask = [0] + [1] * len(diag_1) + [0] + [1] * len(diag_2) + [0]
+            diag_1 = ["[CLS]"] + diag_1 + ["[SEP]"]
+            diag_2 = diag_2 + ["[SEP]"]
+            segment = [0] * len(diag_1) + [1] * len(diag_2)
+            diag = diag_1 + diag_2
 
-        diag = diag_1 + diag_2
 
-        #diag=diag_2
         # word dropout
         if word_dropout > 0.:
             drop_mask = np.array(drop_mask)
@@ -473,7 +481,7 @@ class TrainingInstance:
         self.domain_id = domain2id[self.turn_domain]
         self.op_ids = [self.op2id[a] for a in self.op_labels]
         self.generate_ids = [tokenizer.convert_tokens_to_ids(y) for y in self.generate_y]
-        self.start_idx,self.end_idx,lack_ans,span_mask=self.findidx(self.generate_ids,self.generate_idx,self.input_id)
+        self.start_idx,self.end_idx,lack_ans,span_mask=self.findidx(self.generate_ids,self.generate_idx,self.input_id,turn)
         self.start_position=[]
         self.end_position=[]
         # for gi,g in enumerate(self.generate_idx):
@@ -485,7 +493,7 @@ class TrainingInstance:
         #     self.end_position.append(e_p)
         return lack_ans,span_mask
 
-    def findidx(self,generate_y,generate_idx,inputs_idx):
+    def findidx(self,generate_y,generate_idx,inputs_idx,turn=0):
         gen_map={}
         count=0
         lack_ans=[]
@@ -500,8 +508,11 @@ class TrainingInstance:
                 g_len=len(value)
                 if (value==inputs_idx[i:i+g_len]):
                     if gi in gen_map.keys():
-                        #remove CLS
-                        generate_idx[gen_map[gi]]=[i-1,i+g_len-2]
+                        #turn1 remove CLS
+                        if turn==0 or turn==1:
+                            generate_idx[gen_map[gi]]=[i,i+g_len-1]
+                        elif turn==2:
+                            generate_idx[gen_map[gi]] = [i-1, i + g_len - 2]
         gen_rev = dict(zip(gen_map.values(), gen_map.keys()))
         for gi,g in enumerate(generate_idx):
             if g==[]:

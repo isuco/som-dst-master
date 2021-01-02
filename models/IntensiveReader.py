@@ -41,7 +41,7 @@ class IntensiveReader(nn.Module):
         self.exclude_domain = args.exclude_domain
         self.dropout = nn.Dropout(albert_config.classifier_dropout_prob)
         self.action_cls = nn.Linear(self.hidden_size, n_op)
-        #self.has_ans1 = nn.Sequential(nn.Dropout(p=albert_config.hidden_dropout_prob), nn.Linear(self.hidden_size, 2))
+        self.has_ans1 = nn.Sequential(nn.Dropout(p=albert_config.hidden_dropout_prob), nn.Linear(self.hidden_size, 2))
         if self.exclude_domain is not True:
             self.domain_cls = nn.Linear(self.hidden_size, n_domain)
         self.n_op = n_op
@@ -137,7 +137,7 @@ class IntensiveReader(nn.Module):
         #intensive answer verification
         ques_attn=F.softmax(sequence_output.repeat(self.args.n_slot,1,1).bmm(state_output.transpose(-1,-2)),dim=1)
         sequence_pool_output=ques_attn.transpose(-1,-2).bmm(sequence_output.repeat(self.args.n_slot,1,1)).squeeze()
-        #has_ans=self.has_ans1(sequence_pool_output).view(-1,self.args.n_slot,2)
+        has_ans=self.has_ans1(sequence_pool_output).view(-1,self.args.n_slot,2)
 
         #category answer generating
         sequence_pool_output=sequence_pool_output.view(-1,self.args.n_slot,self.hidden_size)
@@ -147,7 +147,8 @@ class IntensiveReader(nn.Module):
         category_ans_softmax=F.softmax(category_ans,dim=-1)
         # gen_scores = self.decoder(input_ids, decoder_input, sequence_output,
         #                           pooled_output, max_value, teacher=None)
-        return start_logits_softmax,end_logits_softmax,torch.Tensor(1).cuda(),category_ans_softmax,start_logits,end_logits,category_ans
+        return start_logits_softmax, end_logits_softmax, has_ans,category_ans_softmax, start_logits, end_logits, category_ans
+        #return start_logits_softmax,end_logits_softmax,torch.Tensor(1).cuda(),category_ans_softmax,start_logits,end_logits,category_ans
 
 
 # class Encoder(nn.Module):

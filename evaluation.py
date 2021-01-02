@@ -120,8 +120,11 @@ def op_evaluation(start_prediction,end_prediction,gen_prediction,op_prediction,s
     op_prec=op_update_correct/op_update_guess if op_update_guess!=0 else 0
     op_recall=op_update_correct/op_update_gold if op_update_gold!=0 else 0
     op_F1=2*(op_prec*op_recall)/(op_prec+op_recall) if op_prec+op_recall!=0 else 0
-    print(gen_correct)
-    print(gen_guess)
+    # print(op_update_correct)
+    # print(op_update_gold)
+    # print(op_update_guess)
+    # print(gen_correct)
+    # print(gen_guess)
     #print("Update score: operation precision: %.3f, operation_recall : %.3f,operation F1:%.3f"% (
         #op_prec, op_recall,op_F1))
     return gen_acc,op_acc,op_prec,op_recall,op_F1
@@ -192,7 +195,7 @@ def model_evaluation(model, test_data, tokenizer, slot_meta,epoch,slot_ans=None,
         #                                   tokenizer, slot_ans=slot_ans,op_code=op_code, dynamic=True)
 
         gold_op_ids = torch.LongTensor([i.op_ids]).to(device)
-        pred_op_ids=torch.LongTensor([i.pred_op])
+        pred_op_ids=torch.FloatTensor([i.pred_op])
 
         start = time.perf_counter()
         MAX_LENGTH = 9
@@ -202,7 +205,7 @@ def model_evaluation(model, test_data, tokenizer, slot_meta,epoch,slot_ans=None,
         with torch.no_grad():
             # ground-truth state operation
             if eval_generate:
-                start_logits, end_logits, gen_scores = model(input_ids=input_ids,
+                start_logits, end_logits, _,gen_scores,_,_,_ = model(input_ids=input_ids,
                                                                       token_type_ids=segment_ids,
                                                                       state_positions=state_position_ids,
                                                                       attention_mask=input_mask,
@@ -230,7 +233,7 @@ def model_evaluation(model, test_data, tokenizer, slot_meta,epoch,slot_ans=None,
         start_prediction=start_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
         end_prediction = end_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
         #op_predictions = has_ans.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-        op_predictions=pred_op_ids.view(-1).cpu().detach().numpy().tolist()
+        op_predictions=pred_op_ids.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
         gen_predictions = gen_scores.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
         gold_op_ids = gold_op_ids.view(-1).cpu().detach().numpy().tolist()
         #slot_ans_idx = slot_ans_idx.view(-1).cpu().detach().numpy().tolist()
@@ -258,9 +261,9 @@ def model_evaluation(model, test_data, tokenizer, slot_meta,epoch,slot_ans=None,
                 if op_pred==1:
                     slot_idx[idx] = last_slot_idx[idx]
                 else:
-                    if gen_predictions[idx]==len(slot_ans[slot_meta[idx]])-2:
-                        slot_idx[idx]=last_slot_idx[idx]
-                    elif gen_predictions==len(slot_ans[slot_meta[idx]])-1:
+                    # if gen_predictions[idx]==len(slot_ans[slot_meta[idx]])-2:
+                    #     slot_idx[idx]=last_slot_idx[idx]
+                    if gen_predictions==len(slot_ans[slot_meta[idx]])-1:
                         slot_idx[idx]=-1
                     else:
                         slot_idx[idx]=gen_predictions[idx]
@@ -288,6 +291,10 @@ def model_evaluation(model, test_data, tokenizer, slot_meta,epoch,slot_ans=None,
     print(op_correct/(op_guess*30))
     op_recall=op_update_correct/op_update_gold
     op_prec=op_update_correct/op_update_guess
+    print(op_update_correct)
+    print(op_update_gold)
+    print(op_update_guess)
+
     print(op_prec)
     print(op_recall)
     print(2*(op_prec*op_recall)/(op_prec+op_recall))

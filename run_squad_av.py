@@ -414,7 +414,7 @@ def addSpecialTokens(tokenizer,specialtokens):
     special_key = "additional_special_tokens"
     tokenizer.add_special_tokens({special_key: specialtokens})
 
-def fixontology(ontology):
+def fixontology(ontology,turn):
     ontology['hotel-type'].append('none')
     ontology['restaurant-area'].append('none')
     ontology['attraction-area'].append('none')
@@ -423,11 +423,12 @@ def fixontology(ontology):
             ontology[k].append('none')
         if "do n't care" not in ontology[k]:
             ontology[k].append("do n't care")
-        # ontology[k].append('[noans]')
+        if turn!=2:
+            ontology[k].append('[noans]')
         ontology[k].append('[negans]')
     return ontology
 
-def mask_ans_vocab(ontology,slot_meta,tokenizer):
+def mask_ans_vocab(ontology,slot_meta,tokenizer,turn):
     ans_vocab = []
     max_anses = 0
     max_anses_length = 0
@@ -540,7 +541,7 @@ def main():
     # parser.add_argument('--server_port', type=str, default='', help="For distant debugging.")
 
     #DST params
-    parser.add_argument("--data_root", default='data/mwz2.1/', type=str)
+    parser.add_argument("--data_root", default='data/mwz2.0/', type=str)
     parser.add_argument("--train_data", default='train_dials.json', type=str)
     parser.add_argument("--dev_data", default='test_dials.json', type=str)
     parser.add_argument("--test_data", default='test_dials.json', type=str)
@@ -633,13 +634,14 @@ def main():
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
+    turn = 0
 
     ontology = json.load(open(args.data_root+args.ontology_data))
 
     slot_meta, slot_ans_wh = make_slot_meta(ontology)
 
 
-    with torch.cuda.device(1):
+    with torch.cuda.device(0):
         op2id = OP_SET[args.op_code]
         rng = random.Random(args.random_seed)
         print(op2id)
@@ -647,7 +649,7 @@ def main():
         # model = AlbertModel.from_pretrained(args.model_name_or_path+"pytorch_model.bin",config=args.model_name_or_path+"config.json")
         addSpecialTokens(tokenizer,['[SLOT]','[NULL]','[EOS]'])
         args.vocab_size=len(tokenizer)
-        ontology = fixontology(ontology)
+        ontology = fixontology(ontology,turn)
         ans_vocab=mask_ans_vocab(ontology, slot_meta, tokenizer)
         train_data_raw,_,_ = prepare_dataset(data_path=args.data_root+args.train_data,
                                          tokenizer=tokenizer,
@@ -655,9 +657,9 @@ def main():
                                          n_history=args.n_history,
                                          max_seq_length=args.max_seq_length,
                                          op_code=args.op_code,
-                                        op_data_path=args.data_root+"cls_score_train_albert.json",
                                         slot_ans=ontology,
-                                             isfilter=True)
+                                             turn=turn,
+                                             isfilter=False)
                                              #op_data_path=args.data_root+"cls_score_train.json"
 
         train_data = MultiWozDataset(train_data_raw,
@@ -679,7 +681,7 @@ def main():
                                        n_history=args.n_history,
                                        max_seq_length=args.max_seq_length,
                                        op_code=args.op_code,
-                                        op_data_path=args.data_root+"cls_score_test_albert.json",
+                                              turn=turn,
                                         slot_ans=ontology,
                                               isfilter=False)
                                             #  op_data_path=args.data_root+"cls_score_test.json"
@@ -762,7 +764,7 @@ def main():
         # model_config.hidden_dropout_prob = args.hidden_dropout_prob
 
         model = IntensiveReader(args, len(op2id), len(domain2id), op2id['update'],ans_vocab)
-        # checkpoint=torch.load(os.path.join(args.save_dir, 'model_best.bin'))
+        # checkpoint=torch.load(os.path.join(args.save_dir, 'model_best_generate.bin'))
         # model.load_state_dict(checkpoint)
         model.to(args.device)
 
@@ -845,6 +847,9 @@ def main():
         bert_params_ids = list(map(id, model.albert.parameters()))
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
         enc_param_optimizer = list(model.named_parameters())
+        # args.enc_lr=args.enc_lr*0.3
+        # args.base_lr=args.base_lr*0.3
+        # args.enc_warmup=0
         enc_optimizer_grouped_parameters = [
             {'params': [p for n, p in enc_param_optimizer if (id(p) in bert_params_ids and not any(nd in n for nd in no_decay))], 'weight_decay': 0.01,'lr':args.enc_lr},
             {'params': [p for n, p in enc_param_optimizer if id(p) in bert_params_ids and any(nd in n for nd in no_decay)], 'weight_decay': 0.0,'lr':args.enc_lr},
@@ -861,18 +866,19 @@ def main():
         #                                      t_total=num_train_steps)
 
         if n_gpu > 1:
-            model = torch.nn.DataParallel(model,device_ids=[0,3])
+            model = torch.nn.DataParallel(model,device_ids=[0,1,2,3])
 
         #turn=0
-        #loss_fnc = nn.CrossEntropyLoss(reduction='mean')
+        loss_fnc = nn.CrossEntropyLoss(reduction='mean')
         best_score = {'epoch': 0, 'gen_acc': 0, 'op_acc': 0,'op_F1':0}
         #model.eval()
         file_logger = helper.FileLogger(args.save_dir + '/log.txt',
                                         header="# epoch\ttrain_loss\tdev_gscore\tdev_oscore\tdev_opp\tdev_opr\tdev_f1\tbest_gscore\tbest_oscore\tbest_opf1")
         model.train()
+
         for epoch in range(args.n_epochs):
             batch_loss = []
-            #model.eval()
+            model.eval()
             for step, batch in enumerate(train_dataloader):
                 batch = [b.to(device) if not isinstance(b, int) and not isinstance(b,list) else b for b in batch]
                 input_ids, input_mask,slot_mask,segment_ids, state_position_ids, op_ids,pred_ops, domain_ids, gen_ids,start_position,end_position,max_value, max_update,slot_ans_ids,start_idx,end_idx,sid = batch
@@ -891,55 +897,55 @@ def main():
                                                                 max_value=max_value,
                                                                 op_ids=op_ids,
                                                                 max_update=max_update)
-                # turn==0
-                # #sample_mask=(pred_ops==0)
-                # loss_ans = loss_fnc(has_ans.view(-1, len(op2id)), op_ids.view(-1))
-                # # start_loss = loss_fnc(start_logits.view(-1,seq_lens),start_position.view(-1,seq_lens))
-                # # end_loss = loss_fnc(end_logits.view(-1, seq_lens), end_position.view(-1,seq_lens))
-                #
-                # loss_g = masked_cross_entropy_for_value(gen_scores.contiguous(),
-                #                                         slot_ans_ids.contiguous(),
-                #                                         sample_mask=None
-                #                                         )
-                # loss_s=masked_cross_entropy_for_value(start_logits.contiguous(),
-                #                                         start_idx.contiguous(),
-                #                                       sample_mask=None,
-                #                                       pad_idx=-1
-                #                                         )
-                # loss_e=masked_cross_entropy_for_value(end_logits.contiguous(),
-                #                                       end_idx.contiguous(),
-                #                                       sample_mask=None,
-                #                                       pad_idx=-1)
-                #
-                # #loss = 0.3 * loss_g + 0.15 * loss_s + 0.15 * loss_e
-                # loss = 0.4*loss_ans + 0.3*loss_g+0.15*loss_s+0.15*loss_e
-                # weight_sum=0.4+(loss_g!=0).float()*0.3+(loss_s!=0).float()*0.15+0.15*(loss_e!=0).float()
-                # #weight_sum=(loss_g!=0).float()*0.3+(loss_s!=0).float()*0.15+0.15*(loss_e!=0).float()
+                if turn==0:
+                    sample_mask=None
+                    loss_ans = loss_fnc(has_ans.view(-1, len(op2id)), op_ids.view(-1))
+                    # start_loss = loss_fnc(start_logits.view(-1,seq_lens),start_position.view(-1,seq_lens))
+                    # end_loss = loss_fnc(end_logits.view(-1, seq_lens), end_position.view(-1,seq_lens))
 
-                #turn==1
-                sample_mask=(op_ids==0)
-                #loss_ans = loss_fnc(pred_ops.view(-1, len(op2id)), op_ids.view(-1))
-                # start_loss = loss_fnc(start_logits.view(-1,seq_lens),start_position.view(-1,seq_lens))
-                # end_loss = loss_fnc(end_logits.view(-1, seq_lens), end_position.view(-1,seq_lens))
+                    loss_g = masked_cross_entropy_for_value(gen_scores.contiguous(),
+                                                            slot_ans_ids.contiguous(),
+                                                            sample_mask=sample_mask
+                                                            )
+                    loss_s=masked_cross_entropy_for_value(start_logits.contiguous(),
+                                                            start_idx.contiguous(),
+                                                          sample_mask=sample_mask,
+                                                          pad_idx=-1
+                                                            )
+                    loss_e=masked_cross_entropy_for_value(end_logits.contiguous(),
+                                                          end_idx.contiguous(),
+                                                          sample_mask=sample_mask,
+                                                          pad_idx=-1)
 
-                loss_g = masked_cross_entropy_for_value(gen_scores.contiguous(),
-                                                        slot_ans_ids.contiguous(),
-                                                        sample_mask=sample_mask
-                                                        )
-                loss_s = masked_cross_entropy_for_value(start_logits.contiguous(),
-                                                        start_idx.contiguous(),
-                                                        sample_mask=sample_mask,
-                                                        pad_idx=-1
-                                                        )
-                loss_e = masked_cross_entropy_for_value(end_logits.contiguous(),
-                                                        end_idx.contiguous(),
-                                                        sample_mask=sample_mask,
-                                                        pad_idx=-1)
+                    #loss = 0.3 * loss_g + 0.15 * loss_s + 0.15 * loss_e
+                    loss = 0.6*loss_ans + 0.2*loss_g+0.1*loss_s+0.1*loss_e
+                    weight_sum=0.6+(loss_g!=0).float()*0.2+(loss_s!=0).float()*0.1+0.1*(loss_e!=0).float()
+                #weight_sum=(loss_g!=0).float()*0.3+(loss_s!=0).float()*0.15+0.15*(loss_e!=0).float()
 
-                loss = 0.3 * loss_g + 0.15 * loss_s + 0.15 * loss_e
-                #loss = 0.4 * loss_ans + 0.3 * loss_g + 0.15 * loss_s + 0.15 * loss_e
-                #weight_sum = 0.4 + (loss_g != 0).float() * 0.3 + (loss_s != 0).float() * 0.15 + 0.15 * (loss_e != 0).float()
-                weight_sum=(loss_g!=0).float()*0.3+(loss_s!=0).float()*0.15+0.15*(loss_e!=0).float()
+                elif turn==1 or turn==2:
+                    sample_mask=(pred_ops.argmax(dim=-1)==0)
+                    loss_ans = loss_fnc(pred_ops.view(-1, len(op2id)), op_ids.view(-1))
+                    start_loss = loss_fnc(start_logits.view(-1,seq_lens),start_position.view(-1,seq_lens))
+                    end_loss = loss_fnc(end_logits.view(-1, seq_lens), end_position.view(-1,seq_lens))
+
+                    loss_g = masked_cross_entropy_for_value(gen_scores.contiguous(),
+                                                            slot_ans_ids.contiguous(),
+                                                            sample_mask=sample_mask
+                                                            )
+                    loss_s = masked_cross_entropy_for_value(start_logits.contiguous(),
+                                                            start_idx.contiguous(),
+                                                            sample_mask=sample_mask,
+                                                            pad_idx=-1
+                                                            )
+                    loss_e = masked_cross_entropy_for_value(end_logits.contiguous(),
+                                                            end_idx.contiguous(),
+                                                            sample_mask=sample_mask,
+                                                            pad_idx=-1)
+
+                    loss = 0.3 * loss_g + 0.15 * loss_s + 0.15 * loss_e
+                    #loss = 0.4 * loss_ans + 0.3 * loss_g + 0.15 * loss_s + 0.15 * loss_e
+                    #weight_sum = 0.4 + (loss_g != 0).float() * 0.3 + (loss_s != 0).float() * 0.15 + 0.15 * (loss_e != 0).float()
+                    weight_sum=(loss_g!=0).float()*0.3+(loss_s!=0).float()*0.15+0.15*(loss_e!=0).float()
 
                 loss=loss/weight_sum if weight_sum !=0 else loss
                 #loss=loss+start_loss+end_loss
@@ -985,85 +991,117 @@ def main():
                         else:
                             teacher = None
 
-                        #turn==0
-                        # start_logits, end_logits,has_ans,gen_scores = model(input_ids=input_ids,
-                        #                                                       token_type_ids=segment_ids,
-                        #                                                       state_positions=state_position_ids,
-                        #                                                       attention_mask=input_mask,
-                        #                                                       slot_mask=slot_mask,
-                        #                                                       max_value=max_value,
-                        #                                                       op_ids=op_ids,
-                        #                                                       max_update=max_update)
-                        # start_predictions += start_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                        # end_predictions += end_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                        # has_ans_predictions += has_ans.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                        # #has_ans_predictions+=pred_ops.view(-1).cpu().detach().numpy().tolist()
-                        # gen_predictions += gen_scores.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                        # start_ids += start_idx.view(-1).cpu().detach().numpy().tolist()
-                        # end_ids += end_idx.view(-1).cpu().detach().numpy().tolist()
-                        # has_ans_labels += op_ids.view(-1).cpu().detach().numpy().tolist()
-                        # gen_labels += slot_ans_ids.view(-1).cpu().detach().numpy().tolist()
+                        if turn==0:
+                            start_logits, end_logits,has_ans,gen_scores,_,_,_ = model(input_ids=input_ids,
+                                                                                  token_type_ids=segment_ids,
+                                                                                  state_positions=state_position_ids,
+                                                                                  attention_mask=input_mask,
+                                                                                  slot_mask=slot_mask,
+                                                                                  max_value=max_value,
+                                                                                  op_ids=op_ids,
+                                                                                  max_update=max_update)
+                            start_predictions += start_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+                            end_predictions += end_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+                            has_ans_predictions += has_ans.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+                            #has_ans_predictions+=pred_ops.view(-1).cpu().detach().numpy().tolist()
+                            gen_predictions += gen_scores.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+                            start_ids += start_idx.view(-1).cpu().detach().numpy().tolist()
+                            end_ids += end_idx.view(-1).cpu().detach().numpy().tolist()
+                            has_ans_labels += op_ids.view(-1).cpu().detach().numpy().tolist()
+                            gen_labels += slot_ans_ids.view(-1).cpu().detach().numpy().tolist()
 
-                        #turn==1
 
-                        start_logits, end_logits,has_ans,gen_scores,start_scores,end_scores,category_score = model(input_ids=input_ids,
-                                                                              token_type_ids=segment_ids,
-                                                                              state_positions=state_position_ids,
-                                                                              attention_mask=input_mask,
-                                                                              slot_mask=slot_mask,
-                                                                              max_value=max_value,
-                                                                              op_ids=op_ids,
-                                                                              max_update=max_update)
-                        start_predictions += start_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                        end_predictions += end_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                        #has_ans_predictions += has_ans.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                        has_ans_predictions+=pred_ops.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                        gen_predictions += gen_scores.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                        start_ids += start_idx.view(-1).cpu().detach().numpy().tolist()
-                        end_ids += end_idx.view(-1).cpu().detach().numpy().tolist()
-                        has_ans_labels += op_ids.view(-1).cpu().detach().numpy().tolist()
-                        gen_labels += slot_ans_ids.view(-1).cpu().detach().numpy().tolist()
-                        # joint_score=start_scores.unsqueeze(-2)+end_scores.unsqueeze(-1)
-                        # triu_mask=np.triu(np.ones((joint_score.size(-1),joint_score.size(-1))))
-                        # triu_mask[0,1:]=0
-                        # triu_mask=(torch.Tensor(triu_mask)==0).bool()
-                        # joint_score=joint_score.masked_fill(triu_mask.unsqueeze(0).unsqueeze(0).cuda(),-1e9).masked_fill(slot_mask.unsqueeze(1).unsqueeze(-2)==0,-1e9)
-                        # joint_score=F.softmax(joint_score.view(joint_score.size(0),joint_score.size(1),-1),dim=-1).view(joint_score.size(0),joint_score.size(1),seq_lens,-1)
-                        #
-                        #
-                        # score_diff = (joint_score[:,:,0,0]-joint_score[:,:,1:,1:].max(dim=-1)[0].max(dim=-1)[0])
-                        # score_noans = pred_ops[:,:,-1]-pred_ops[:,:,0]
-                        #
-                        #
-                        # slot_ans_mask=ans_vocab.sum(-1)!=0
-                        # ans_idx = slot_ans_mask.sum(dim=-1)-2
-                        # neg_ans_mask = torch.cat((torch.linspace(0, ans_vocab.size(0) - 1, ans_vocab.size(0)).unsqueeze(0).long(), ans_idx.unsqueeze(0)),
-                        #     dim=0)
-                        # neg_ans_mask = torch.sparse_coo_tensor(neg_ans_mask, torch.ones(ans_vocab.size(0)),
-                        #                                        (ans_vocab.size(0), ans_vocab.size(1))).to_dense().cuda()
-                        # score_neg=gen_scores.masked_fill(neg_ans_mask.unsqueeze(0)==0,-1e9).max(dim=-1)[0]
-                        # score_has=gen_scores.masked_fill(neg_ans_mask.unsqueeze(0)==1,-1e9).max(dim=-1)[0]
-                        # cate_score_diff=score_neg-score_has
-                        # score_diff=torch.where(start_idx!=-1,score_diff,cate_score_diff)
-                        # score_verify+=((score_noans*0.5+score_diff*0.5)>0).long().view(-1).cpu().detach().numpy().tolist()
+                        elif turn==1:
+                            start_logits, end_logits,has_ans,gen_scores,start_scores,end_scores,category_score = model(input_ids=input_ids,
+                                                                                  token_type_ids=segment_ids,
+                                                                                  state_positions=state_position_ids,
+                                                                                  attention_mask=input_mask,
+                                                                                  slot_mask=slot_mask,
+                                                                                  max_value=max_value,
+                                                                                  op_ids=op_ids,
+                                                                                  max_update=max_update)
+                            start_predictions += start_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+                            end_predictions += end_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+                            #has_ans_predictions += has_ans.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+                            has_ans_predictions+=pred_ops.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+                            gen_predictions += gen_scores.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+                            start_ids += start_idx.view(-1).cpu().detach().numpy().tolist()
+                            end_ids += end_idx.view(-1).cpu().detach().numpy().tolist()
+                            has_ans_labels += op_ids.view(-1).cpu().detach().numpy().tolist()
+                            gen_labels += slot_ans_ids.view(-1).cpu().detach().numpy().tolist()
+                            joint_score=start_scores.unsqueeze(-2)+end_scores.unsqueeze(-1)
+                            triu_mask=np.triu(np.ones((joint_score.size(-1),joint_score.size(-1))))
+                            triu_mask[0,1:]=0
+                            triu_mask=(torch.Tensor(triu_mask)==0).bool()
+                            joint_score=joint_score.masked_fill(triu_mask.unsqueeze(0).unsqueeze(0).cuda(),-1e9).masked_fill(slot_mask.unsqueeze(1).unsqueeze(-2)==0,-1e9)
+                            joint_score=F.softmax(joint_score.view(joint_score.size(0),joint_score.size(1),-1),dim=-1).view(joint_score.size(0),joint_score.size(1),seq_lens,-1)
 
-                    gen_acc, op_acc, op_prec, op_recall, op_F1 = op_evaluation(start_predictions, end_predictions,
-                                                                               gen_predictions, has_ans_predictions,
-                                                                               start_ids, end_ids, gen_labels,
-                                                                               has_ans_labels)
-                    # eval_res = model_evaluation(model, dev_data_raw, tokenizer, slot_meta, epoch + 1, args.op_code)
-                    file_logger.log(
-                        "{}\t{:.6f}\t{:.6f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}".format(epoch, loss,gen_acc, op_acc,
-                                                                                                            op_prec,op_recall,op_F1,
-                                                                                                            max(gen_acc,best_score['gen_acc']),
-                                                                                                            max(op_acc,best_score['op_acc']),max(op_F1,best_score['op_F1'])))
+
+                            score_diff = (joint_score[:,:,0,0]-joint_score[:,:,1:,1:].max(dim=-1)[0].max(dim=-1)[0])
+                            score_noans = pred_ops[:,:,-1]-pred_ops[:,:,0]
+
+
+                            slot_ans_mask=ans_vocab.sum(-1)!=0
+                            ans_idx = slot_ans_mask.sum(dim=-1)-2
+                            neg_ans_mask = torch.cat((torch.linspace(0, ans_vocab.size(0) - 1, ans_vocab.size(0)).unsqueeze(0).long(), ans_idx.unsqueeze(0)),
+                                dim=0)
+                            neg_ans_mask = torch.sparse_coo_tensor(neg_ans_mask, torch.ones(ans_vocab.size(0)),
+                                                                   (ans_vocab.size(0), ans_vocab.size(1))).to_dense().cuda()
+                            score_neg=gen_scores.masked_fill(neg_ans_mask.unsqueeze(0)==0,-1e9).max(dim=-1)[0]
+                            score_has=gen_scores.masked_fill(neg_ans_mask.unsqueeze(0)==1,-1e9).max(dim=-1)[0]
+                            cate_score_diff=score_neg-score_has
+                            score_diff=torch.where(start_idx!=-1,score_diff,cate_score_diff)
+                            score_verify+=((score_noans*0.5+score_diff*0.5)>0).long().view(-1).cpu().detach().numpy().tolist()
+
+                        elif turn==2:
+                            start_logits, end_logits, has_ans, gen_scores, _, _, _ = model(input_ids=input_ids,
+                                                                                           token_type_ids=segment_ids,
+                                                                                           state_positions=state_position_ids,
+                                                                                           attention_mask=input_mask,
+                                                                                           slot_mask=slot_mask,
+                                                                                           max_value=max_value,
+                                                                                           op_ids=op_ids,
+                                                                                           max_update=max_update)
+                            start_predictions += start_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+                            end_predictions += end_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+                            has_ans_predictions += pred_ops.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+                            # has_ans_predictions+=pred_ops.view(-1).cpu().detach().numpy().tolist()
+                            gen_predictions += gen_scores.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+                            start_ids += start_idx.view(-1).cpu().detach().numpy().tolist()
+                            end_ids += end_idx.view(-1).cpu().detach().numpy().tolist()
+                            has_ans_labels += op_ids.view(-1).cpu().detach().numpy().tolist()
+                            gen_labels += slot_ans_ids.view(-1).cpu().detach().numpy().tolist()
+
+                        if turn==0 or turn==2:
+                            gen_acc, op_acc, op_prec, op_recall, op_F1 = op_evaluation(start_predictions, end_predictions,
+                                                                                       gen_predictions, has_ans_predictions,
+                                                                                       start_ids, end_ids, gen_labels,
+                                                                                       has_ans_labels)
+                        elif turn==1:
+                           gen_acc, op_acc, op_prec, op_recall, op_F1 = op_evaluation(start_predictions, end_predictions,
+                                                                                       gen_predictions, score_verify,
+                                                                                       start_ids, end_ids, gen_labels,
+                                                                                       has_ans_labels)
+
+                        #eval_res = model_evaluation(model, dev_data_raw, tokenizer, slot_meta, epoch + 1, args.op_code)
+                        file_logger.log(
+                            "{}\t{:.6f}\t{:.6f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}".format(epoch, loss,gen_acc, op_acc,
+                                                                                                                op_prec,op_recall,op_F1,
+                                                                                                                max(gen_acc,best_score['gen_acc']),
+                                                                                                                max(op_acc,best_score['op_acc']),max(op_F1,best_score['op_F1'])))
                     model_to_save = model.module if hasattr(model, 'module') else model
-                    if gen_acc > best_score['gen_acc']:
+                    if op_F1 > best_score['op_F1']:
                         best_score['op_acc'] = op_acc
                         best_score['gen_acc'] = gen_acc
                         best_score['op_F1'] = op_F1
                         save_path = os.path.join(args.save_dir, 'model_best_generate.bin')
-                        torch.save(model_to_save.state_dict(), save_path)
+                        params={
+                            'model':model_to_save.state_dict(),
+                            'optimizer':enc_optimizer.state_dict(),
+                            'scheduler':enc_scheduler,
+                            'args':args
+                        }
+                        torch.save(params, save_path)
                         file_logger.log("new best model saved at epoch {}: {:.2f}\t{:.2f}\t{:.2f}" \
                                         .format(epoch, gen_acc * 100, op_acc * 100, op_F1 * 100))
                     save_path = os.path.join(args.save_dir, 'checkpoint_epoch_'+str(epoch)+'.bin')
@@ -1163,7 +1201,7 @@ def main():
         # gen_acc, op_acc,op_prec,op_recall,op_F1 = op_evaluation(start_predictions, end_predictions, gen_predictions, has_ans_predictions, start_ids,
         #                                end_ids, gen_labels, has_ans_labels,isopmask=False)
         # print(gen_acc)
-        #scores= model_evaluation(model, test_data_raw, tokenizer, slot_meta, 0,slot_ans=ontology,op_code=args.op_code)
+        #scores= model_evaluation(model, dev_data_raw, tokenizer, slot_meta, 0,slot_ans=ontology,op_code=args.op_code)
 
         # if op_acc > best_score['op_acc']:
         #     best_score['op_acc'] = op_acc
