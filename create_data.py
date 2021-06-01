@@ -195,7 +195,7 @@ def getDialogueAct(filename, data, data2, idx, idx_acts):
 
 def get_summary_bstate(bstate, get_domain=False):
     """Based on the mturk annotations we form multi-domain belief state"""
-    domains = [u'taxi',u'restaurant',  u'hospital', u'hotel',u'attraction', u'train', u'police']
+    domains = [u'taxi',u'restaurant',  u'hospital', u'hotel',u'attraction', u'train',u'police']
     summary_bstate = []
     summary_bvalue = []
     active_domain = []
@@ -212,9 +212,9 @@ def get_summary_bstate(bstate, get_domain=False):
                 else:
                     booking.append(0)
             else:
-                if bstate[domain]['book'][slot] != "":
+                if all([s!="" for s in bstate[domain]['book'][slot]]):
                     booking.append(1)
-                    summary_bvalue.append(["{}-book {}".format(domain, slot.strip().lower()), normalize(bstate[domain]['book'][slot].strip().lower(), False)]) #(["book", domain, slot, bstate[domain]['book'][slot]])
+                    summary_bvalue.append(["{}-book {}".format(domain, slot.strip().lower()), [normalize(i.strip().lower(),False) for i in bstate[domain]['book'][slot]]]) #(["book", domain, slot, bstate[domain]['book'][slot]])
                 else:
                     booking.append(0)
         if domain == 'train':
@@ -226,13 +226,13 @@ def get_summary_bstate(bstate, get_domain=False):
 
         for slot in bstate[domain]['semi']:
             slot_enc = [0, 0, 0]  # not mentioned, dontcare, filled
-            if bstate[domain]['semi'][slot] == 'not mentioned':
+            if any([s== 'not mentioned' for s in bstate[domain]['semi'][slot]]):
                 slot_enc[0] = 1
-            elif bstate[domain]['semi'][slot] in ['dont care', 'dontcare', "don't care", "do not care"]:
+            elif any([s in ['dont care', 'dontcare', "don't care", "do not care"] for s in bstate[domain]['semi'][slot]]):
                 slot_enc[1] = 1
                 summary_bvalue.append(["{}-{}".format(domain, slot.strip().lower()), "dontcare"]) #(["semi", domain, slot, "dontcare"])
-            elif bstate[domain]['semi'][slot]:
-                summary_bvalue.append(["{}-{}".format(domain, slot.strip().lower()), normalize(bstate[domain]['semi'][slot].strip().lower(), False)]) #(["semi", domain, slot, bstate[domain]['semi'][slot]])
+            elif bstate[domain]['semi'][slot]!="":
+                summary_bvalue.append(["{}-{}".format(domain, slot.strip().lower()), [normalize(i.strip().lower(),False) for i in bstate[domain]['semi'][slot]]]) #(["semi", domain, slot, bstate[domain]['semi'][slot]])
             if slot_enc != [0, 0, 0]:
                 domain_active = True
             summary_bstate += slot_enc
@@ -301,6 +301,7 @@ def get_dial(dialogue):
     sys_a = [t['dialogue_acts'] for t in d_orig['sys_log']]
     bvs = [t['belief_value_summary'] for t in d_orig['sys_log']]
     domain = [t['domain'] for t in d_orig['usr_log']]
+    span=[t['span_info'] for t in d_orig['usr_log']]
     for item in zip(usr, sys, sys_a, domain, bvs):
         dial.append({'usr':item[0],'sys':item[1], 'sys_a':item[2], 'domain':item[3], 'bvs':item[4]})
     return dial
@@ -519,8 +520,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--main_dir", type=str, default='dataset/MULTIWOZ2.0')
-    parser.add_argument("--mwz_ver", type=str, default='2.0')
-    parser.add_argument("--target_path", type=str, default='data/mwz2.0')
+    parser.add_argument("--main_dir", type=str, default='E:/NLP学习/对话/MULTIWOZ2.1')
+    parser.add_argument("--mwz_ver", type=str, default='2.1')
+    parser.add_argument("--target_path", type=str, default='data/mwz2.2')
     args = parser.parse_args()
     main(args)

@@ -1,12 +1,9 @@
-"""
-SOM-DST
-Copyright (c) 2020-present NAVER Corp.
-MIT license
-"""
+
 
 import numpy as np
 import json
 from torch.utils.data import Dataset
+from utils import constant
 import torch
 import random
 import re
@@ -27,21 +24,62 @@ OP_SET = {
     '4': {'delete': 0, 'update': 1, 'dontcare': 2, 'carryover': 3},
     '6': {'delete': 0, 'update': 1, 'dontcare': 2, 'carryover': 3, 'yes': 4, 'no': 5}
 }
+track_slots=[ "attraction-area",
+  "attraction-name",
+  "attraction-type",
+  "hotel-area",
+  "hotel-bookday",
+  "hotel-bookpeople",
+  "hotel-bookstay",
+  "hotel-internet",
+  "hotel-name",
+  "hotel-parking",
+  "hotel-pricerange",
+  "hotel-stars",
+  "hotel-type",
+  "restaurant-area",
+  "restaurant-bookday",
+  "restaurant-bookpeople",
+  "restaurant-booktime",
+  "restaurant-food",
+  "restaurant-name",
+  "restaurant-pricerange",
+  "taxi-arriveby",
+  "taxi-departure",
+  "taxi-destination",
+  "taxi-leaveat",
+  "train-arriveby",
+  "train-bookpeople",
+  "train-day",
+  "train-departure",
+  "train-destination",
+  "train-leaveat"]
 
 def map_state_to_ids(slot_state,slot_meta,slot_ans):
     keys = list(slot_state.keys())
     slot_ans_idx = [-1] * len(slot_meta)
     for k in keys:
-        # if k[:8]=='hospital' or k[:5]=='polic':
-        #     continue
+        if k[:8]=='hospital' or k[:5]=='polic':
+            continue
         v = slot_state[k]
-        v_list = slot_ans[k]
-        if v in v_list:
-            v_idx = v_list.index(v)
+        if v==[]:
+            continue
+        v_list = slot_meta[k]['db']
+        st=slot_meta[k]['type']
+        v=v[0]
+        if not st:
+            v_idx=-1
         else:
-            v_idx = find_value_idx(v, v_list)
-        k_idx = slot_meta.index(k)
-        slot_ans_idx[k_idx] = v_idx
+            if v in v_list:
+                v_idx = v_list.index(v)
+            else:
+                v_idx = find_value_idx(v, v_list)
+                slot_state[k]=v_list[v_idx]
+        for i,z in enumerate(slot_ans):
+            if z['name']==k:
+                slot_ans_idx[i] = v_idx
+                break
+
     return slot_ans_idx
 
 def make_turn_label(slot_meta, last_dialog_state, turn_dialog_state,
@@ -60,26 +98,36 @@ def make_turn_label(slot_meta, last_dialog_state, turn_dialog_state,
     #         ans_vocab.append(tokenizer.encode(v))
     op_labels = ['carryover'] * len(slot_meta)
     generate_idx=[[0,0]]*len(slot_meta)
-    generate_y = []
+    generate_y=[]
+    for s in slot_meta:
+        generate_y.append([])
     keys = list(turn_dialog_state.keys())
     slot_ans_idx=[-1]*len(slot_meta)
     for k in keys:
-        # if k[:8]=='hospital' or k[:5]=='polic':
-        #     continue
-        v = turn_dialog_state[k]
-        v_list=slot_ans[k]
-        if v in v_list:
-            v_idx=v_list.index(v)
-        else:
-            v_idx=find_value_idx(v,v_list)
-        k_idx=slot_meta.index(k)
-        slot_ans_idx[k_idx]=v_idx
-        if v == 'none':
-            turn_dialog_state.pop(k)
+        if k[:8]=='hospital' or k[:5]=='polic':
             continue
+        v = turn_dialog_state[k]
+        for z,sa in enumerate(slot_ans):
+            if sa['name']==k:
+                k_idx=z
+                break
+        iscate=slot_meta[k]['type']
+        if iscate and v!=[]:
+            vv=v[0]
+            v_list=slot_meta[k]['db']
+            if vv in v_list:
+                v_idx=v_list.index(vv)
+            else:
+                v_idx=find_value_idx(vv,v_list)
+                turn_dialog_state[k]=v_list[v_idx]
+        else:
+            v_idx=-1
+        slot_ans_idx[k_idx]=v_idx
+        if v==['none']:
+            turn_dialog_state[k]=[]
         vv = last_dialog_state.get(k)
         try:
-            idx = slot_meta.index(k)
+            idx = k_idx
             if vv != v:
                 # if v == 'dontcare' and OP_SET[op_code].get('dontcare') is not None:
                 #     op_labels[idx] = 'dontcare'
@@ -89,36 +137,59 @@ def make_turn_label(slot_meta, last_dialog_state, turn_dialog_state,
                 #     op_labels[idx] = 'no'
                 # else:
                 op_labels[idx] = 'update'
-                generate_y.append([tokenizer.tokenize(v) + ['[EOS]'], idx])
-                generate_idx[idx]=[]
+                s_ans=[tokenizer.tokenize(sv) + ['[EOS]'] for sv in v]
+                if ((v==['none'] or v==[]) and vv!=[]):
+                    slot_ans_idx[idx] = len(slot_ans[idx]['db']) - 1
+                    generate_y[idx] = ['[SEP]']
+                    generate_idx[idx] = []
+                else:
+                    generate_y[idx] = s_ans
+                    generate_idx[idx]=[]
+                    if not slot_meta[k]['type']:
+                        slot_ans_idx[idx]=[s_ans]
                 # op_labels[idx]='update'
-            elif vv == v:
+            else:
                 # op_labels[idx] = 'carryover'
+                #s_ans = [tokenizer.tokenize(sv) + ['[EOS]'] for sv in v]
+                #generate_y[idx]=s_ans
                 op_labels[idx]='carryover'
         except ValueError:
             continue
-    if turn==1 or turn==2:
-        for i,val in enumerate(slot_ans_idx):
-            if val==-1:
-                slot_ans_idx[i]=len(slot_ans[slot_meta[i]])-2
-    for k, v in last_dialog_state.items():
-        vv = turn_dialog_state.get(k)
-        try:
-            idx = slot_meta.index(k)
-            if vv is None:
-                if OP_SET[op_code].get('delete') is not None:
-                    op_labels[idx] = 'delete'
-                    slot_ans_idx[idx]=len(slot_ans[k])-1
-                    generate_idx[idx]=[-1,-1]
-                else:
-                    op_labels[idx] = 'carryover'
-                    # generate_y.append([['[NULL]', '[EOS]'], idx])
-        except ValueError:
-            continue
-    gold_state = [str(k) + '-' + str(v) for k, v in turn_dialog_state.items()]
-    if len(generate_y) > 0:
-        generate_y = sorted(generate_y, key=lambda lst: lst[1])
-        generate_y, _ = [list(e) for e in list(zip(*generate_y))]
+    # for k in last_dialog_state.keys():
+    #     if k not in keys:
+    #         for z, sa in enumerate(slot_ans):
+    #             if sa['name'] == k:
+    #                 idx = z
+    #                 break
+    #         slot_ans_idx[idx] = len(slot_ans[k]) - 1
+    #         generate_y.append(['[SEP]'])
+    #         generate_idx[idx] = []
+    #         op_labels[idx]='update'
+    # if turn==1 or turn==0:
+    #     for i,val in enumerate(slot_ans_idx):
+    #         if val==-1:
+    #             slot_ans_idx[i]=len(slot_meta[slot_ans[i]['name']]['db'])-2
+    # for k, v in last_dialog_state.items():
+    #     vv = turn_dialog_state.get(k)
+    #     for si,sa in enumerate(slot_ans):
+    #         if sa['name']==k:
+    #             idx=si
+    #             break
+    #     try:
+    #         if vv==[] and:
+    #             if OP_SET[op_code].get('delete') is not None:
+    #                 op_labels[idx] = 'delete'
+    #             else:
+    #                 slot_ans_idx[idx] = len(slot_ans[idx]['db']) - 1
+    #                 generate_idx[idx] = [-1, -1]
+    #                 op_labels[idx] = 'update'
+    #                 # generate_y.append([['[NULL]', '[EOS]'], idx])
+    #     except ValueError:
+    #         continue
+    gold_state = [str(k) + '-' + str(v[0]) if v!=[] else str(k)+'-[]' for k, v in turn_dialog_state.items()]
+       # if len(generate_y) > 0:
+    #     generate_y = sorted(generate_y, key=lambda lst: lst[1])
+    #     generate_y, _ = [list(e) for e in list(zip(*generate_y))]
 
     if dynamic:
         op2id = OP_SET[op_code]
@@ -129,7 +200,7 @@ def make_turn_label(slot_meta, last_dialog_state, turn_dialog_state,
 
 def find_value_idx(v,v_list):
     if v=='dontcare':
-        return v_list.index("do n't care")
+        return v_list.index("[dontcare]")
     elif v=='wartworth':
         return v_list.index("warkworth house")
     else:
@@ -181,23 +252,54 @@ def postprocessing(slot_meta, ops, last_dialog_state,
 
     return generated, last_dialog_state
 
+#2.1-
+# def make_slot_meta(ontology):
+#     meta = []
+#     change = {}
+#     idx = 0
+#     max_len = 0
+#     for i, k in enumerate(ontology.keys()):
+#         d, s = k.split('-')
+#         if d not in EXPERIMENT_DOMAINS:
+#             continue
+#         if 'price' in s or 'leave' in s or 'arrive' in s:
+#             s = s.replace(' ', '')
+#         ss = s.split()
+#         if len(ss) + 1 > max_len:
+#             max_len = len(ss) + 1
+#         meta.append('-'.join([d, s]))
+#         change[meta[-1]] = ontology[k]
 
-def make_slot_meta(ontology):
+def make_slot_meta(ontology,turn=0):
     meta = []
     change = {}
     idx = 0
     max_len = 0
-    for i, k in enumerate(ontology.keys()):
-        d, s = k.split('-')
+    esm_ans=constant.ansvocab
+    slot_map=constant.slot_map
+    for ea in esm_ans:
+        if turn < 2:
+            ea.append("[noans]")
+        if ea is not None:
+            ea.append("[negans]")
+            ea.append("[dontcare]")
+
+    for i, k in enumerate(ontology):
+        d=k['service_name']
+
         if d not in EXPERIMENT_DOMAINS:
             continue
-        if 'price' in s or 'leave' in s or 'arrive' in s:
-            s = s.replace(' ', '')
-        ss = s.split()
-        if len(ss) + 1 > max_len:
-            max_len = len(ss) + 1
-        meta.append('-'.join([d, s]))
-        change[meta[-1]] = ontology[k]
+        slots=k['slots']
+        for s in slots:
+            if s['name'] not in track_slots:
+                continue
+            if 'price' in s['name'] or 'leave' in s['name'] or 'arrive' in s['name']:
+                s['name'] = s['name'].replace(' ', '')
+            slot_dic={}
+            slot_dic['type']=s['is_categorical']
+            if slot_dic['type']:
+                slot_dic['db']=esm_ans[slot_map[s['name']]]
+            change[s['name']] = slot_dic
 
     return sorted(meta), change
 
@@ -210,7 +312,7 @@ global_diag_level=None
 global_op_code=None
 global_pred_op=None
 global_isfilter=False
-global_tur=0
+global_turn=0
 # def map_state_to_id(slot_state,slot_meta,slot_ans):
 #     slot_idx=[-1]*len(slot_state)
 #     keys=slot_state.keys()
@@ -236,6 +338,10 @@ def process_dial_dict(dial_dict):
     global global_max_seq_length, global_op_code, global_tokenizer, global_slot_ans, global_slot_ans, global_slot_meta, global_n_history, global_diag_level,global_pred_op,global_isfilter,global_turn
     dialog_history = []
     last_dialog_state = {}
+    for sa in global_slot_ans:
+        last_dialog_state[sa['name']]=[]
+
+
     last_uttr = ""
     for ti, turn in enumerate(dial_dict["dialogue"]):
         turn_domain = turn["domain"]
@@ -245,21 +351,21 @@ def process_dial_dict(dial_dict):
         turn_uttr = (turn["system_transcript"] + ' ; ' + turn["transcript"]).strip()
         dialog_history.append(last_uttr)
         pop_state = []
-        for ss in turn['belief_state']:
-            s = ss['slots']
-            if s[0][0][:8] == 'hospital' or s[0][0][:5] == 'hotel':
-                pop_state.append(ss)
-        for ss in pop_state:
-            turn['belief_state'].remove(ss)
-        pop_state = []
-        for ss in turn['turn_label']:
-            if ss[0][:8] == 'hospital' or ss[0][:5] == 'hotel':
-                pop_state.append(ss)
-        for ss in pop_state:
-            turn['turn_label'].remove(ss)
+        # for ss in turn['belief_state']:
+        #     s = ss['slots']
+        #     if s[0][0][:8] == 'hospital' or s[0][0][:5] == 'hotel':
+        #         pop_state.append(ss)
+        # for ss in pop_state:
+        #     turn['belief_state'].remove(ss)
+        # pop_state = []
+        # for ss in turn['turn_label']:
+        #     if ss[0][:8] == 'hospital' or ss[0][:5] == 'hotel':
+        #         pop_state.append(ss)
+        # for ss in pop_state:
+        #     turn['turn_label'].remove(ss)
         turn_dialog_state = fix_general_label_error(turn["belief_state"], False, global_slot_meta)
         last_uttr = turn_uttr
-
+        sample_ids = dial_dict["dialogue_idx"] + "_" + str(turn_id)
         op_labels, generate_y, gold_state, generate_idx, slot_ans_idx = make_turn_label(global_slot_meta,
                                                                                         last_dialog_state,
                                                                                         turn_dialog_state,
@@ -273,20 +379,36 @@ def process_dial_dict(dial_dict):
         else:
             is_last_turn = False
         #last_dialog_state=map_state_to_id(last_dialog_state,global_slot_meta,global_slot_ans)
+
         gold_state_idx=map_state_to_ids(turn_dialog_state,global_slot_meta,global_slot_ans)
-        sample_ids=dial_dict["dialogue_idx"]+"_"+str(turn_id)
+        # for gi in gold_state:
+        #     vlist=gi.split("-")
+        #     i=0
+        #     while i<len(vlist):
+        #         if "-".join(vlist[:-1-i]) in global_slot_meta.keys():
+        #             turn_dialog_state["-".join(vlist[:-1-i])]="-".join(vlist[-1-i:])
+        #             break
+        #         i+=1
+        turn_uttr = fixutter(turn_uttr, turn_dialog_state)
+        last_uttr = turn_uttr
+
         if global_pred_op is not None:
             pred_op=np.array(global_pred_op[sample_ids])
         else:
             pred_op=[]
-        isdrop=global_isfilter and (all(op=='carryover' for op in op_labels))
+        isdrop=False
+
+        if global_turn==1:
+            isdrop = global_isfilter and (all(op == 1 for op in pred_op.argmax(axis=-1)))
+        if global_turn==2:
+            isdrop = global_isfilter and (all(op=='carryover' for op in op_labels))
         if not isdrop:
             instance = TrainingInstance(dial_dict["dialogue_idx"], turn_domain,
                                         turn_id, turn_uttr, ' '.join(dialog_history[-global_n_history:]),
                                         last_dialog_state, op_labels,pred_op,
                                         generate_y, generate_idx, gold_state,gold_state_idx, global_max_seq_length, global_slot_meta,
                                         is_last_turn, slot_ans_idx, op_code=global_op_code)
-            instance.make_instance(global_tokenizer)
+            instance.make_instance(global_tokenizer,turn=global_turn)
         # for ans in lack_ans_eos:
         #     if len(ans)>0 and ans not in lack_answer:
         #         lack_answer.append(ans)
@@ -296,7 +418,44 @@ def process_dial_dict(dial_dict):
         last_dialog_state = turn_dialog_state
     return datas
 
-
+def fixutter(utter,tstate):
+    state={}
+    for si in tstate.keys():
+        if tstate[si]!=[]:
+            state[si]=tstate[si]
+    similar_str={}
+    if state=={}:
+        return utter
+    for ui in range(len(utter)):
+        if utter[ui] == " ":
+            continue
+        for sv in state.values():
+            s=sv[0]
+            i = 0
+            j = 0
+            canstr=""
+            ismatch= (ui+len(s) < len(utter))
+            if ismatch:
+                while (i < len(s) and ui+j < len(utter)):
+                    if s[i]==" " or s[i]=="'":
+                        i+=1
+                        continue
+                    canstr+=utter[ui+j]
+                    if utter[j+ui]==" " or utter[j+ui]=="'":
+                        j+=1
+                        continue
+                    else:
+                        if s[i]!=utter[ui+j]:
+                            ismatch=False
+                            break
+                        i+=1
+                        j+=1
+            if ismatch:
+                similar_str[canstr]=s
+    for si in similar_str.keys():
+        if si!='':
+            utter=utter.replace(si,similar_str[si])
+    return utter
 
 def prepare_dataset(data_path, tokenizer, slot_meta,
                     n_history, max_seq_length, slot_ans=None,diag_level=False, op_code='4',op_data_path=None,isfilter=True,turn=0):
@@ -313,7 +472,7 @@ def prepare_dataset(data_path, tokenizer, slot_meta,
     if op_data_path is not None:
         with open(op_data_path,'r') as f:
             global_pred_op=json.load(f)
-    data = []
+    datas = []
     domain_counter = {}
     lack_answer = []
     max_resp_len, max_value_len = 0, 0
@@ -324,12 +483,14 @@ def prepare_dataset(data_path, tokenizer, slot_meta,
     # lack_answer=[tokenizer.convert_ids_to_tokens(ans) for ans in lack_answer]
     span_masks = []
     dials = json.load(open(data_path))
+    # for d in dials:
+    #      datas+=process_dial_dict(d)
     with fu.ProcessPoolExecutor() as excutor:
         datas=list(excutor.map(process_dial_dict, dials))
-    data=reduce(lambda x,y:x+y,datas)
+    datas=reduce(lambda x,y:x+y,datas)
     # with open('lack_answer.json','w') as f:
     #     json.dump(lack_answer,f)
-    return data,[],[]
+    return datas,[],[]
 
 
 
@@ -399,7 +560,7 @@ class TrainingInstance:
 
 
     def make_instance(self, tokenizer,lack_ans=[],max_seq_length=None,
-                      word_dropout=0., slot_token='[SLOT]',turn=0):
+                      word_dropout=0., slot_token='[SLOT]',turn=0,eval_token=False):
         if max_seq_length is None:
             max_seq_length = self.max_seq_length
         state = []
@@ -407,9 +568,15 @@ class TrainingInstance:
             state.append(slot_token)
             k = s.split('-')
             v = self.last_dialog_state.get(s)
-            if v is not None:
-                k.extend(['-', v])
-                t = tokenizer.tokenize(' '.join(k))
+            if v !=[]:
+                if not eval_token:
+                    v=v[0]
+                if not self.slot_meta[s]['type'] and eval_token:
+                    t = tokenizer.tokenize(' '.join(k))
+                    t=t+['-']+v
+                else:
+                    k.extend(['-', v])
+                    t=tokenizer.tokenize(' '.join(k))
             else:
                 t = tokenizer.tokenize(' '.join(k))
                 t.extend(['-', '[NULL]'])
@@ -428,7 +595,7 @@ class TrainingInstance:
                 avail_length = len(diag_2) - avail_length_1
                 diag_2 = diag_2[avail_length:]
             drop_mask = [0] + [1] * len(diag_2) + [0]
-            diag_2 = ["CLS"] + diag_2 + ["[SEP]"]
+            diag_2 = ["[CLS]"] + diag_2 + ["[SEP]"]
             segment = [0] * len(diag_2)
             diag = diag_2
         else:
@@ -443,6 +610,9 @@ class TrainingInstance:
             if len(diag_1) == 0 and len(diag_2) > avail_length_1:
                 avail_length = len(diag_2) - avail_length_1
                 diag_2 = diag_2[avail_length:]
+            # if len(diag_2) > avail_length_1:
+            #     avail_length = len(diag_2) - avail_length_1
+            #     diag_2 = diag_2[avail_length:]
             drop_mask = [0] + [1] * len(diag_1) + [0] + [1] * len(diag_2) + [0]
             diag_1 = ["[CLS]"] + diag_1 + ["[SEP]"]
             diag_2 = diag_2 + ["[SEP]"]
@@ -480,7 +650,7 @@ class TrainingInstance:
         self.input_mask = input_mask
         self.domain_id = domain2id[self.turn_domain]
         self.op_ids = [self.op2id[a] for a in self.op_labels]
-        self.generate_ids = [tokenizer.convert_tokens_to_ids(y) for y in self.generate_y]
+        self.generate_ids = [[tokenizer.convert_tokens_to_ids(ans) for ans in y] for y in self.generate_y]
         self.start_idx,self.end_idx,lack_ans,span_mask=self.findidx(self.generate_ids,self.generate_idx,self.input_id,turn)
         self.start_position=[]
         self.end_position=[]
@@ -494,30 +664,48 @@ class TrainingInstance:
         return lack_ans,span_mask
 
     def findidx(self,generate_y,generate_idx,inputs_idx,turn=0):
-        gen_map={}
+        # gen_map={}
         count=0
         lack_ans=[]
         span_mask=[1]*len(generate_idx)
-        for g,gy in enumerate(generate_idx):
-            if gy!=[0,0] and gy!=[0,0]:
-                gen_map[count]=g
-                count+=1
-        for i,t_id in enumerate(inputs_idx):
-            for gi,value in enumerate(generate_y):
-                value=value[:-1]
-                g_len=len(value)
-                if (value==inputs_idx[i:i+g_len]):
-                    if gi in gen_map.keys():
-                        #turn1 remove CLS
-                        if turn==0 or turn==1:
-                            generate_idx[gen_map[gi]]=[i,i+g_len-1]
-                        elif turn==2:
-                            generate_idx[gen_map[gi]] = [i-1, i + g_len - 2]
-        gen_rev = dict(zip(gen_map.values(), gen_map.keys()))
+        # for g,gy in enumerate(generate_idx):
+        #     if gy!=[0,0]:
+        #         gen_map[count]=g
+        #         count+=1
+        lastsep=-1
+        firstsep=-1
+        for i,ch in enumerate(inputs_idx):
+            if ch==constant.ALBERT_SEP:
+                if firstsep==-1:
+                    firstsep=i
+                lastsep=i
+
+        for gi,value in enumerate(generate_y):
+            if value==[]:
+                continue
+            elif value==[constant.ALBERT_SEP]:
+                sep=lastsep
+                generate_idx[gi] = [sep, sep]
+            else:
+                hasfound=False
+                for i, t_id in enumerate(inputs_idx[:lastsep]):
+                    for gans in value:
+                        gans=gans[:-1]
+                        g_len=len(gans)
+                        if (gans==inputs_idx[i:i+g_len]):
+                                #turn1 remove CLS
+                            if turn==0 or turn==1:
+                                generate_idx[gi]=[i,i+g_len-1]
+                            elif turn==2:
+                                # generate_idx[gi] = [i, i + g_len - 1]
+                                generate_idx[gi] = [i, i + g_len-1]
+                            hasfound=True
+                            break
+                    if hasfound:
+                        break
         for gi,g in enumerate(generate_idx):
             if g==[]:
                 generate_idx[gi]=[-1,-1]
-                lack_ans.append(generate_y[gen_rev[gi]][:-2])
         start_idx=[generate_idx[i][0] for i in range(len(generate_idx))]
         end_idx = [generate_idx[i][-1] for i in range(len(generate_idx))]
         return start_idx,end_idx,lack_ans,span_mask
@@ -525,7 +713,7 @@ class TrainingInstance:
 
 class MultiWozDataset(Dataset):
     def __init__(self, data, tokenizer, slot_meta, max_seq_length, rng,
-                 ontology, word_dropout=0.1, shuffle_state=False, shuffle_p=0.5):
+                 ontology, word_dropout=0.1, shuffle_state=False, shuffle_p=0.5,turn=2):
         self.data = data
         self.len = len(data)
         self.tokenizer = tokenizer
@@ -536,6 +724,7 @@ class MultiWozDataset(Dataset):
         self.shuffle_state = shuffle_state
         self.shuffle_p = shuffle_p
         self.rng = rng
+        self.turn=turn
 
     def __len__(self):
         return self.len
@@ -548,7 +737,7 @@ class MultiWozDataset(Dataset):
                 self.data[idx].shuffle_state(self.rng, self.slot_meta)
         if self.word_dropout > 0 or self.shuffle_state:
             self.data[idx].make_instance(self.tokenizer,
-                                         word_dropout=self.word_dropout)
+                                         word_dropout=self.word_dropout,turn=self.turn)
         return self.data[idx]
 
     def collate_fn(self, batch):
@@ -558,7 +747,7 @@ class MultiWozDataset(Dataset):
         state_position_ids = torch.tensor([f.slot_position for f in batch], dtype=torch.long)
         op_ids = torch.tensor([f.op_ids for f in batch], dtype=torch.long)
         pred_op_ids=torch.tensor([f.pred_op for f in batch],dtype=torch.float)
-        pred_op_ids=F.softmax(pred_op_ids,dim=-1)
+        # pred_op_ids=F.softmax(pred_op_ids,dim=-1)
         slot_ans_ids=torch.tensor([f.slot_ans_ids for f in batch],dtype=torch.long)
         domain_ids = torch.tensor([f.domain_id for f in batch], dtype=torch.long)
         gen_ids = [b.generate_ids for b in batch]
@@ -577,6 +766,6 @@ class MultiWozDataset(Dataset):
             for idx, v in enumerate(b):
                 b[idx] = v + [0] * (max_value - len(v))
             gen_ids[bid] = b + [[0] * max_value] * (max_update - n_update)
-        gen_ids = torch.tensor(gen_ids, dtype=torch.long)
+        # gen_ids = torch.tensor(gen_ids, dtype=torch.long)
 
         return input_ids, input_mask,slot_mask,segment_ids, state_position_ids, op_ids, pred_op_ids,domain_ids, gen_ids,start_position,end_position,max_value, max_update,slot_ans_ids,start_idx,end_idx,sid

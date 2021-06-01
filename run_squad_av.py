@@ -41,6 +41,7 @@ from tqdm import tqdm, trange
 from models.IntensiveReader import IntensiveReader
 import torch.nn as nn
 from utils.data_utils import prepare_dataset, MultiWozDataset
+from utils import constant
 from utils.fix_label import fix_general_label_error
 # from utils.eval_utils import compute_prf, compute_acc, per_domain_join_accuracy
 # from utils.ckpt_utils import download_ckpt, convert_ckpt_compatible
@@ -80,6 +81,42 @@ import sys
 import csv
 csv.field_size_limit(sys.maxsize)
 logger = logging.getLogger(__name__)
+
+track_slots=[ "attraction-area",
+  "attraction-name",
+  "attraction-type",
+  "bus-day",
+  "bus-departure",
+  "bus-destination",
+  "bus-leaveat",
+  "hospital-department",
+  "hotel-area",
+  "hotel-bookday",
+  "hotel-bookpeople",
+  "hotel-bookstay",
+  "hotel-internet",
+  "hotel-name",
+  "hotel-parking",
+  "hotel-pricerange",
+  "hotel-stars",
+  "hotel-type",
+  "restaurant-area",
+  "restaurant-bookday",
+  "restaurant-bookpeople",
+  "restaurant-booktime",
+  "restaurant-food",
+  "restaurant-name",
+  "restaurant-pricerange",
+  "taxi-arriveby",
+  "taxi-departure",
+  "taxi-destination",
+  "taxi-leaveat",
+  "train-arriveby",
+  "train-bookpeople",
+  "train-day",
+  "train-departure",
+  "train-destination",
+  "train-leaveat"]
 
 # ALL_MODELS = sum((tuple(conf.pretrained_config_archive_map.keys()) for conf in (BertConfig, XLNetConfig, XLMConfig,
 #                                                                                 RobertaConfig, DistilBertConfig)), ())
@@ -392,10 +429,12 @@ def train(args,train_dataloader,dev_data_raw,slot_meta,model, tokenizer):
 #     dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels)
 #     return dataset,id_map
 
-def masked_cross_entropy_for_value(logits, target,sample_mask=None,pad_idx=-1):
+def masked_cross_entropy_for_value(logits, target,sample_mask=None,slot_mask=None,pad_idx=-1):
     mask=logits.eq(0)
     pad_mask=target.ne(pad_idx)
+    target=target.masked_fill(target<0,0)
     sample_mask=pad_mask&sample_mask if sample_mask is not None else pad_mask
+    sample_mask = slot_mask & sample_mask if slot_mask is not None else sample_mask
     target=target.masked_fill(sample_mask==0,0)
     logits=logits.masked_fill(mask,1)
     logits_flat = logits.view(-1, logits.size(-1))
@@ -414,35 +453,110 @@ def addSpecialTokens(tokenizer,specialtokens):
     special_key = "additional_special_tokens"
     tokenizer.add_special_tokens({special_key: specialtokens})
 
-def fixontology(ontology,turn):
-    ontology['hotel-type'].append('none')
-    ontology['restaurant-area'].append('none')
-    ontology['attraction-area'].append('none')
-    for k in ontology.keys():
-        if 'day' in k:
-            ontology[k].append('none')
-        if "do n't care" not in ontology[k]:
-            ontology[k].append("do n't care")
-        if turn!=2:
-            ontology[k].append('[noans]')
-        ontology[k].append('[negans]')
-    return ontology
+def fixontology(ontology,turn,tokenizer):
+    ans_vocab=[]
+    esm_ans_vocab=[]
+    # ontology['hotel-type']['db'].append('none')
+    # ontology['restaurant-area']['db'].append('none')
+    # ontology['attraction-area']['db'].append('none')
+    esm_ans=constant.ansvocab
+    slot_map=constant.slot_map
+    slot_mm=np.zeros((len(slot_map),len(esm_ans)))
+    max_anses_length=0
+    max_anses=0
+    for i,k in enumerate(ontology.keys()):
+        if k in track_slots:
+            s=ontology[k]
+            s['name'] = k
+            if not s['type']:
+               s['db']=[]
+            slot_mm[i][slot_map[s['name']]] = 1
+            ans_vocab.append(s)
+    for si in esm_ans:
+        slot_anses=[]
+        for ans in si:
+            enc_ans=tokenizer.encode(ans)
+            max_anses_length = max(max_anses_length, len(ans))
+            slot_anses.append(enc_ans)
+        max_anses = max(max_anses, len(slot_anses))
+        esm_ans_vocab.append(slot_anses)
+    for s in esm_ans_vocab:
+        for ans in s:
+            gap = max_anses_length - len(ans)
+            ans += [0] * gap
+        gap = max_anses - len(s)
+        s += [[0] * max_anses_length] * gap
+    esm_ans_vocab = np.array(esm_ans_vocab)
+    ans_vocab_tensor = torch.from_numpy(esm_ans_vocab)
+    slot_mm=torch.from_numpy(slot_mm).float()
+    return ans_vocab,slot_mm,ans_vocab_tensor
 
-def mask_ans_vocab(ontology,slot_meta,tokenizer,turn):
+#turn1
+# def fixontology(ontology,turn):
+#     ontology['hotel-type'].append('none')
+#     ontology['restaurant-area'].append('none')
+#     ontology['attraction-area'].append('none')
+#     for k in ontology.keys():
+#         s=[]
+#         if[]
+#         if 'day' in k:
+#             ontology[k].append('none')
+#         if "do n't care" not in ontology[k]:
+#             ontology[k].append("do n't care")
+#         if turn!=2:
+#             ontology[k].append('[noans]')
+#         ontology[k].append('[negans]')
+#     return ontology
+
+# def mask_ans_vocab(ontology,slot_meta,tokenizer):
+#     ans_vocab = []
+#     max_anses = 0
+#     max_anses_length = 0
+#     change_k=[]
+#     for k in ontology.keys():
+#         if (' range' in k) or (' at' in  k) or (' by' in k):
+#             change_k.append(k)
+#         # fix_label(ontology[k])
+#     for key in change_k:
+#         new_k=key.replace(' ','')
+#         ontology[new_k]=ontology[key]
+#         del ontology[key]
+#     for s in slot_meta:
+#         v_list = ontology[s]
+#         slot_anses = []
+#         for v in v_list:
+#             ans = tokenizer.encode(v)
+#             max_anses_length = max(max_anses_length, len(ans))
+#             slot_anses.append(ans)
+#         max_anses = max(max_anses, len(slot_anses))
+#         ans_vocab.append(slot_anses)
+#     for s in ans_vocab:
+#         for ans in s:
+#             gap = max_anses_length - len(ans)
+#             ans += [0] * gap
+#         gap = max_anses - len(s)
+#         s += [[0] * max_anses_length] * gap
+#     ans_vocab=np.array(ans_vocab)
+#     ans_vocab_tensor = torch.from_numpy(ans_vocab)
+#     return ans_vocab_tensor,ans_vocab
+
+
+def mask_ans_vocab(ontology,slot_meta,tokenizer):
     ans_vocab = []
     max_anses = 0
     max_anses_length = 0
     change_k=[]
-    for k in ontology.keys():
-        if (' range' in k) or (' at' in  k) or (' by' in k):
+    cate_mask=[]
+    for k in ontology:
+        if (' range' in k['name']) or (' at' in  k['name']) or (' by' in k['name']):
             change_k.append(k)
         # fix_label(ontology[k])
     for key in change_k:
-        new_k=key.replace(' ','')
-        ontology[new_k]=ontology[key]
-        del ontology[key]
-    for s in slot_meta:
-        v_list = ontology[s]
+        new_k=key['name'].replace(' ','')
+        key['name']=new_k
+    for s in ontology:
+        cate_mask.append(s['type'])
+        v_list = s['db']
         slot_anses = []
         for v in v_list:
             ans = tokenizer.encode(v)
@@ -456,8 +570,9 @@ def mask_ans_vocab(ontology,slot_meta,tokenizer,turn):
             ans += [0] * gap
         gap = max_anses - len(s)
         s += [[0] * max_anses_length] * gap
-    ans_vocab = torch.LongTensor(ans_vocab)
-    return ans_vocab
+    ans_vocab=np.array(ans_vocab)
+    ans_vocab_tensor = torch.from_numpy(ans_vocab)
+    return ans_vocab_tensor,ans_vocab,cate_mask
 
 def main():
     parser = argparse.ArgumentParser()
@@ -501,11 +616,11 @@ def main():
                         help="Number of updates steps to accumulate before performing a backward/update pass.")     
     parser.add_argument("--learning_rate", default=5e-5, type=float,
                         help="The initial learning rate for Adam.")
-    parser.add_argument("--weight_decay", default=0.01, type=float,
+    parser.add_argument("--weight_decay", default=0.1, type=float,
                         help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float,
                         help="Epsilon for Adam optimizer.")
-    parser.add_argument("--max_grad_norm", default=1.0, type=float,
+    parser.add_argument("--max_grad_norm", default=5.0, type=float,
                         help="Max gradient norm.")
     parser.add_argument("--num_train_epochs", default=3.0, type=float,
                         help="Total number of training epochs to perform.")
@@ -541,11 +656,11 @@ def main():
     # parser.add_argument('--server_port', type=str, default='', help="For distant debugging.")
 
     #DST params
-    parser.add_argument("--data_root", default='data/mwz2.0/', type=str)
+    parser.add_argument("--data_root", default='data/mwz2.2/', type=str)
     parser.add_argument("--train_data", default='train_dials.json', type=str)
     parser.add_argument("--dev_data", default='test_dials.json', type=str)
     parser.add_argument("--test_data", default='test_dials.json', type=str)
-    parser.add_argument("--ontology_data", default='ontology.json', type=str)
+    parser.add_argument("--ontology_data", default='schema.json', type=str)
     parser.add_argument("--vocab_path", default='assets/vocab.txt', type=str)
     # parser.add_argument("--bert_config_path", default='assets/bert_config_base_uncased.json', type=str)
     # parser.add_argument("--bert_ckpt_path", de
@@ -558,14 +673,14 @@ def main():
     parser.add_argument("--enc_warmup", default=0.01, type=float)
     parser.add_argument("--dec_warmup", default=0.01, type=float)
     parser.add_argument("--enc_lr", default=5e-6, type=float)
-    parser.add_argument("--base_lr", default=5e-5, type=float)
-    parser.add_argument("--n_epochs", default=30, type=int)
+    parser.add_argument("--base_lr", default=1e-4, type=float)
+    parser.add_argument("--n_epochs", default=10, type=int)
     parser.add_argument("--eval_epoch", default=1, type=int)
 
     parser.add_argument("--op_code", default="2", type=str)
     parser.add_argument("--slot_token", default="[SLOT]", type=str)
-    parser.add_argument("--dropout", default=0.1, type=float)
-    parser.add_argument("--hidden_dropout_prob", default=0.1, type=float)
+    parser.add_argument("--dropout", default=0.0, type=float)
+    parser.add_argument("--hidden_dropout_prob", default=0.0, type=float)
     parser.add_argument("--attention_probs_dropout_prob", default=0.1, type=float)
     parser.add_argument("--decoder_teacher_forcing", default=0.5, type=float)
     parser.add_argument("--word_dropout", default=0.1, type=float)
@@ -634,11 +749,11 @@ def main():
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-    turn = 0
+    turn = 2
 
     ontology = json.load(open(args.data_root+args.ontology_data))
 
-    slot_meta, slot_ans_wh = make_slot_meta(ontology)
+    _, slot_meta = make_slot_meta(ontology)
 
 
     with torch.cuda.device(0):
@@ -647,10 +762,20 @@ def main():
         print(op2id)
         tokenizer = AlbertTokenizer.from_pretrained(args.model_name_or_path + "spiece.model")
         # model = AlbertModel.from_pretrained(args.model_name_or_path+"pytorch_model.bin",config=args.model_name_or_path+"config.json")
-        addSpecialTokens(tokenizer,['[SLOT]','[NULL]','[EOS]'])
+        addSpecialTokens(tokenizer,['[SLOT]','[NULL]','[EOS]','[dontcare]','[negans]','[noans]'])
         args.vocab_size=len(tokenizer)
-        ontology = fixontology(ontology,turn)
-        ans_vocab=mask_ans_vocab(ontology, slot_meta, tokenizer)
+        ontology,slot_mm,esm_ans_vocab = fixontology(slot_meta,turn,tokenizer)
+        ans_vocab,ans_vocab_nd,cate_mask=mask_ans_vocab(ontology, slot_meta, tokenizer)
+        model = IntensiveReader(args, len(op2id), len(domain2id), op2id['update'], esm_ans_vocab, slot_mm, turn=turn)
+        if turn>0:
+            train_op_data_path = args.data_root + "cls_score_train_turn0.json"
+            test_op_data_path = args.data_root + "cls_score_test_turn0.json"
+            isfilter=True
+        else:
+            train_op_data_path=None
+            test_op_data_path=None
+            isfilter=False
+
         train_data_raw,_,_ = prepare_dataset(data_path=args.data_root+args.train_data,
                                          tokenizer=tokenizer,
                                          slot_meta=slot_meta,
@@ -659,7 +784,9 @@ def main():
                                          op_code=args.op_code,
                                         slot_ans=ontology,
                                              turn=turn,
-                                             isfilter=False)
+                                             op_data_path=train_op_data_path,
+                                             isfilter=isfilter
+                                             )
                                              #op_data_path=args.data_root+"cls_score_train.json"
 
         train_data = MultiWozDataset(train_data_raw,
@@ -670,7 +797,8 @@ def main():
                                      ontology,
                                      args.word_dropout,
                                      args.shuffle_state,
-                                     args.shuffle_p)
+                                     args.shuffle_p,
+                                     turn=turn)
         print("# train examples %d" % len(train_data_raw))
 
 
@@ -683,6 +811,7 @@ def main():
                                        op_code=args.op_code,
                                               turn=turn,
                                         slot_ans=ontology,
+                                              op_data_path=test_op_data_path,
                                               isfilter=False)
                                             #  op_data_path=args.data_root+"cls_score_test.json"
 
@@ -694,9 +823,10 @@ def main():
                                      args.max_seq_length,
                                      rng,
                                      ontology,
-                                     args.word_dropout,
+                                     0,
                                      args.shuffle_state,
-                                     args.shuffle_p)
+                                     args.shuffle_p,
+                                   turn=turn)
         #
         # test_data_raw,_,_= prepare_dataset(data_path=args.data_root+args.test_data,
         #                                 tokenizer=tokenizer,
@@ -716,7 +846,8 @@ def main():
         #                              ontology,
         #                              args.word_dropout,
         #                              args.shuffle_state,
-        #                              args.shuffle_p)
+        #                              args.shuffle_p,
+        #                              turn=turn)
         # test_sampler = RandomSampler(test_data)
         # test_dataloader = DataLoader(test_data,
         #                               sampler=test_sampler,
@@ -763,11 +894,11 @@ def main():
         # model_config.attention_probs_dropout_prob = args.attention_probs_dropout_prob
         # model_config.hidden_dropout_prob = args.hidden_dropout_prob
 
-        model = IntensiveReader(args, len(op2id), len(domain2id), op2id['update'],ans_vocab)
-        # checkpoint=torch.load(os.path.join(args.save_dir, 'model_best_generate.bin'))
-        # model.load_state_dict(checkpoint)
-        model.to(args.device)
 
+        checkpoint=torch.load(os.path.join(args.save_dir, 'model_best_generate.bin'))
+        model.load_state_dict(checkpoint['model'])
+        #model.load_state_dict(checkpoint)
+        model.to(args.device)
         logger.info("Training/evaluation parameters %s", args)
 
 
@@ -847,8 +978,8 @@ def main():
         bert_params_ids = list(map(id, model.albert.parameters()))
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
         enc_param_optimizer = list(model.named_parameters())
-        # args.enc_lr=args.enc_lr*0.3
-        # args.base_lr=args.base_lr*0.3
+        # args.enc_lr=args.enc_lr*0.8
+        # args.base_lr=args.base_lr*0.8
         # args.enc_warmup=0
         enc_optimizer_grouped_parameters = [
             {'params': [p for n, p in enc_param_optimizer if (id(p) in bert_params_ids and not any(nd in n for nd in no_decay))], 'weight_decay': 0.01,'lr':args.enc_lr},
@@ -857,315 +988,321 @@ def main():
             {'params': [p for n, p in enc_param_optimizer if id(p) not in bert_params_ids and any(nd in n for nd in no_decay)], 'weight_decay':0.0,'lr':args.base_lr}]
 
         enc_optimizer = AdamW(enc_optimizer_grouped_parameters, lr=args.base_lr)
+
+        # enc_optimizer.load_state_dict(checkpoint['optimizer'])
+
         enc_scheduler = WarmupLinearSchedule(enc_optimizer, int(num_train_steps * args.enc_warmup),
                                              t_total=num_train_steps)
-
+        #enc_scheduler.load_state_dict(checkpoint['scheduler'])
         # dec_param_optimizer = list(model.decoder.parameters())
         # dec_optimizer = AdamW(dec_param_optimizer, lr=args.dec_lr)
         # dec_scheduler = WarmupLinearSchedule(dec_optimizer, int(num_train_steps * args.dec_warmup),
         #                                      t_total=num_train_steps)
 
         if n_gpu > 1:
-            model = torch.nn.DataParallel(model,device_ids=[0,1,2,3])
+            model = torch.nn.DataParallel(model,device_ids=[0,1])
 
-        #turn=0
         loss_fnc = nn.CrossEntropyLoss(reduction='mean')
         best_score = {'epoch': 0, 'gen_acc': 0, 'op_acc': 0,'op_F1':0}
         #model.eval()
         file_logger = helper.FileLogger(args.save_dir + '/log.txt',
                                         header="# epoch\ttrain_loss\tdev_gscore\tdev_oscore\tdev_opp\tdev_opr\tdev_f1\tbest_gscore\tbest_oscore\tbest_opf1")
-        model.train()
-
-        for epoch in range(args.n_epochs):
-            batch_loss = []
-            model.eval()
-            for step, batch in enumerate(train_dataloader):
-                batch = [b.to(device) if not isinstance(b, int) and not isinstance(b,list) else b for b in batch]
-                input_ids, input_mask,slot_mask,segment_ids, state_position_ids, op_ids,pred_ops, domain_ids, gen_ids,start_position,end_position,max_value, max_update,slot_ans_ids,start_idx,end_idx,sid = batch
-                batch_size=input_ids.shape[0]
-                seq_lens=input_ids.shape[1]
-                if rng.random() < args.decoder_teacher_forcing:  # teacher forcing
-                    teacher = gen_ids
-                else:
-                    teacher = None
-
-                start_logits,end_logits,has_ans,gen_scores,_,_,_= model(input_ids=input_ids,
-                                                                token_type_ids=segment_ids,
-                                                                state_positions=state_position_ids,
-                                                                attention_mask=input_mask,
-                                                                slot_mask=slot_mask,
-                                                                max_value=max_value,
-                                                                op_ids=op_ids,
-                                                                max_update=max_update)
-                if turn==0:
-                    sample_mask=None
-                    loss_ans = loss_fnc(has_ans.view(-1, len(op2id)), op_ids.view(-1))
-                    # start_loss = loss_fnc(start_logits.view(-1,seq_lens),start_position.view(-1,seq_lens))
-                    # end_loss = loss_fnc(end_logits.view(-1, seq_lens), end_position.view(-1,seq_lens))
-
-                    loss_g = masked_cross_entropy_for_value(gen_scores.contiguous(),
-                                                            slot_ans_ids.contiguous(),
-                                                            sample_mask=sample_mask
-                                                            )
-                    loss_s=masked_cross_entropy_for_value(start_logits.contiguous(),
-                                                            start_idx.contiguous(),
-                                                          sample_mask=sample_mask,
-                                                          pad_idx=-1
-                                                            )
-                    loss_e=masked_cross_entropy_for_value(end_logits.contiguous(),
-                                                          end_idx.contiguous(),
-                                                          sample_mask=sample_mask,
-                                                          pad_idx=-1)
-
-                    #loss = 0.3 * loss_g + 0.15 * loss_s + 0.15 * loss_e
-                    loss = 0.6*loss_ans + 0.2*loss_g+0.1*loss_s+0.1*loss_e
-                    weight_sum=0.6+(loss_g!=0).float()*0.2+(loss_s!=0).float()*0.1+0.1*(loss_e!=0).float()
-                #weight_sum=(loss_g!=0).float()*0.3+(loss_s!=0).float()*0.15+0.15*(loss_e!=0).float()
-
-                elif turn==1 or turn==2:
-                    sample_mask=(pred_ops.argmax(dim=-1)==0)
-                    loss_ans = loss_fnc(pred_ops.view(-1, len(op2id)), op_ids.view(-1))
-                    start_loss = loss_fnc(start_logits.view(-1,seq_lens),start_position.view(-1,seq_lens))
-                    end_loss = loss_fnc(end_logits.view(-1, seq_lens), end_position.view(-1,seq_lens))
-
-                    loss_g = masked_cross_entropy_for_value(gen_scores.contiguous(),
-                                                            slot_ans_ids.contiguous(),
-                                                            sample_mask=sample_mask
-                                                            )
-                    loss_s = masked_cross_entropy_for_value(start_logits.contiguous(),
-                                                            start_idx.contiguous(),
-                                                            sample_mask=sample_mask,
-                                                            pad_idx=-1
-                                                            )
-                    loss_e = masked_cross_entropy_for_value(end_logits.contiguous(),
-                                                            end_idx.contiguous(),
-                                                            sample_mask=sample_mask,
-                                                            pad_idx=-1)
-
-                    loss = 0.3 * loss_g + 0.15 * loss_s + 0.15 * loss_e
-                    #loss = 0.4 * loss_ans + 0.3 * loss_g + 0.15 * loss_s + 0.15 * loss_e
-                    #weight_sum = 0.4 + (loss_g != 0).float() * 0.3 + (loss_s != 0).float() * 0.15 + 0.15 * (loss_e != 0).float()
-                    weight_sum=(loss_g!=0).float()*0.3+(loss_s!=0).float()*0.15+0.15*(loss_e!=0).float()
-
-                loss=loss/weight_sum if weight_sum !=0 else loss
-                #loss=loss+start_loss+end_loss
-                batch_loss.append(loss.item())
-                loss.backward()
-                enc_optimizer.step()
-                enc_scheduler.step()
-                # dec_optimizer.step()
-                # dec_scheduler.step()
-                model.zero_grad()
-                loss=loss.item()
-
-                if step % 100 == 0:
-                    if args.exclude_domain is not True:
-                        print("[%d/%d] [%d/%d] mean_loss : %.3f, start_loss : %.3f, end_loss : %.3f" \
-                              % (epoch + 1, args.n_epochs, step,
-                                 len(train_dataloader), np.mean(batch_loss),
-                                 loss_s.item(),loss_e.item()))
-                    else:
-                        print("[%d/%d] [%d/%d] mean_loss : %.3f, state_loss : %.3f," \
-                              % (epoch + 1, args.n_epochs, step,
-                                 len(train_dataloader), np.mean(batch_loss),
-                                 loss.item()))
-                    batch_loss = []
-                if (step+1)% 1000 == 0:
-                    model.eval()
-                    start_predictions = []
-                    start_ids = []
-                    end_predictions = []
-                    end_ids = []
-                    has_ans_predictions = []
-                    has_ans_labels = []
-                    gen_predictions = []
-                    gen_labels = []
-                    score_verify=[]
-                    for step, batch in enumerate(dev_dataloader):
-                        batch = [b.to(device) if not isinstance(b, int) and not isinstance(b,list) else b for b in batch]
-                        input_ids, input_mask, slot_mask, segment_ids, state_position_ids, op_ids,pred_ops, domain_ids, gen_ids, start_position, end_position, max_value, max_update, slot_ans_ids, start_idx, end_idx,sid = batch
-                        batch_size = input_ids.shape[0]
-                        seq_lens = input_ids.shape[1]
-                        if rng.random() < args.decoder_teacher_forcing:  # teacher forcing
-                            teacher = gen_ids
-                        else:
-                            teacher = None
-
-                        if turn==0:
-                            start_logits, end_logits,has_ans,gen_scores,_,_,_ = model(input_ids=input_ids,
-                                                                                  token_type_ids=segment_ids,
-                                                                                  state_positions=state_position_ids,
-                                                                                  attention_mask=input_mask,
-                                                                                  slot_mask=slot_mask,
-                                                                                  max_value=max_value,
-                                                                                  op_ids=op_ids,
-                                                                                  max_update=max_update)
-                            start_predictions += start_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                            end_predictions += end_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                            has_ans_predictions += has_ans.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                            #has_ans_predictions+=pred_ops.view(-1).cpu().detach().numpy().tolist()
-                            gen_predictions += gen_scores.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                            start_ids += start_idx.view(-1).cpu().detach().numpy().tolist()
-                            end_ids += end_idx.view(-1).cpu().detach().numpy().tolist()
-                            has_ans_labels += op_ids.view(-1).cpu().detach().numpy().tolist()
-                            gen_labels += slot_ans_ids.view(-1).cpu().detach().numpy().tolist()
-
-
-                        elif turn==1:
-                            start_logits, end_logits,has_ans,gen_scores,start_scores,end_scores,category_score = model(input_ids=input_ids,
-                                                                                  token_type_ids=segment_ids,
-                                                                                  state_positions=state_position_ids,
-                                                                                  attention_mask=input_mask,
-                                                                                  slot_mask=slot_mask,
-                                                                                  max_value=max_value,
-                                                                                  op_ids=op_ids,
-                                                                                  max_update=max_update)
-                            start_predictions += start_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                            end_predictions += end_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                            #has_ans_predictions += has_ans.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                            has_ans_predictions+=pred_ops.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                            gen_predictions += gen_scores.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                            start_ids += start_idx.view(-1).cpu().detach().numpy().tolist()
-                            end_ids += end_idx.view(-1).cpu().detach().numpy().tolist()
-                            has_ans_labels += op_ids.view(-1).cpu().detach().numpy().tolist()
-                            gen_labels += slot_ans_ids.view(-1).cpu().detach().numpy().tolist()
-                            joint_score=start_scores.unsqueeze(-2)+end_scores.unsqueeze(-1)
-                            triu_mask=np.triu(np.ones((joint_score.size(-1),joint_score.size(-1))))
-                            triu_mask[0,1:]=0
-                            triu_mask=(torch.Tensor(triu_mask)==0).bool()
-                            joint_score=joint_score.masked_fill(triu_mask.unsqueeze(0).unsqueeze(0).cuda(),-1e9).masked_fill(slot_mask.unsqueeze(1).unsqueeze(-2)==0,-1e9)
-                            joint_score=F.softmax(joint_score.view(joint_score.size(0),joint_score.size(1),-1),dim=-1).view(joint_score.size(0),joint_score.size(1),seq_lens,-1)
-
-
-                            score_diff = (joint_score[:,:,0,0]-joint_score[:,:,1:,1:].max(dim=-1)[0].max(dim=-1)[0])
-                            score_noans = pred_ops[:,:,-1]-pred_ops[:,:,0]
-
-
-                            slot_ans_mask=ans_vocab.sum(-1)!=0
-                            ans_idx = slot_ans_mask.sum(dim=-1)-2
-                            neg_ans_mask = torch.cat((torch.linspace(0, ans_vocab.size(0) - 1, ans_vocab.size(0)).unsqueeze(0).long(), ans_idx.unsqueeze(0)),
-                                dim=0)
-                            neg_ans_mask = torch.sparse_coo_tensor(neg_ans_mask, torch.ones(ans_vocab.size(0)),
-                                                                   (ans_vocab.size(0), ans_vocab.size(1))).to_dense().cuda()
-                            score_neg=gen_scores.masked_fill(neg_ans_mask.unsqueeze(0)==0,-1e9).max(dim=-1)[0]
-                            score_has=gen_scores.masked_fill(neg_ans_mask.unsqueeze(0)==1,-1e9).max(dim=-1)[0]
-                            cate_score_diff=score_neg-score_has
-                            score_diff=torch.where(start_idx!=-1,score_diff,cate_score_diff)
-                            score_verify+=((score_noans*0.5+score_diff*0.5)>0).long().view(-1).cpu().detach().numpy().tolist()
-
-                        elif turn==2:
-                            start_logits, end_logits, has_ans, gen_scores, _, _, _ = model(input_ids=input_ids,
-                                                                                           token_type_ids=segment_ids,
-                                                                                           state_positions=state_position_ids,
-                                                                                           attention_mask=input_mask,
-                                                                                           slot_mask=slot_mask,
-                                                                                           max_value=max_value,
-                                                                                           op_ids=op_ids,
-                                                                                           max_update=max_update)
-                            start_predictions += start_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                            end_predictions += end_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                            has_ans_predictions += pred_ops.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                            # has_ans_predictions+=pred_ops.view(-1).cpu().detach().numpy().tolist()
-                            gen_predictions += gen_scores.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-                            start_ids += start_idx.view(-1).cpu().detach().numpy().tolist()
-                            end_ids += end_idx.view(-1).cpu().detach().numpy().tolist()
-                            has_ans_labels += op_ids.view(-1).cpu().detach().numpy().tolist()
-                            gen_labels += slot_ans_ids.view(-1).cpu().detach().numpy().tolist()
-
-                        if turn==0 or turn==2:
-                            gen_acc, op_acc, op_prec, op_recall, op_F1 = op_evaluation(start_predictions, end_predictions,
-                                                                                       gen_predictions, has_ans_predictions,
-                                                                                       start_ids, end_ids, gen_labels,
-                                                                                       has_ans_labels)
-                        elif turn==1:
-                           gen_acc, op_acc, op_prec, op_recall, op_F1 = op_evaluation(start_predictions, end_predictions,
-                                                                                       gen_predictions, score_verify,
-                                                                                       start_ids, end_ids, gen_labels,
-                                                                                       has_ans_labels)
-
-                        #eval_res = model_evaluation(model, dev_data_raw, tokenizer, slot_meta, epoch + 1, args.op_code)
-                        file_logger.log(
-                            "{}\t{:.6f}\t{:.6f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}".format(epoch, loss,gen_acc, op_acc,
-                                                                                                                op_prec,op_recall,op_F1,
-                                                                                                                max(gen_acc,best_score['gen_acc']),
-                                                                                                                max(op_acc,best_score['op_acc']),max(op_F1,best_score['op_F1'])))
-                    model_to_save = model.module if hasattr(model, 'module') else model
-                    if turn==1 or turn==0:
-                        isbest=op_F1>best_score['op_F1']
-                        saved_name='model_best_turn'+str(turn)+'.bin'
-                    else:
-                        isbest=gen_acc>best_score['gen_acc']
-                        saved_name='model_best_generate.bin'
-                    if isbest:
-                        best_score['op_acc'] = op_acc
-                        best_score['gen_acc'] = gen_acc
-                        best_score['op_F1'] = op_F1
-                        save_path = os.path.join(args.save_dir, saved_name)
-                        params={
-                            'model':model_to_save.state_dict(),
-                            'optimizer':enc_optimizer.state_dict(),
-                            'scheduler':enc_scheduler,
-                            'args':args
-                        }
-                        torch.save(params, save_path)
-                        file_logger.log("new best model saved at epoch {}: {:.2f}\t{:.2f}\t{:.2f}" \
-                                        .format(epoch, gen_acc * 100, op_acc * 100, op_F1 * 100))
-                    save_path = os.path.join(args.save_dir, 'checkpoint_epoch_'+str(epoch)+'.bin')
-                    torch.save(model_to_save.state_dict(), save_path)
-                    print(
-                        "Best Score : generate_accurate : %.3f, operation_accurate : %.3f,operation_precision : %.3f, operation_recall:%.3f,operation_F1 : %.3f" % (
-                            gen_acc, op_acc, op_prec, op_recall, op_F1))
-                    print("\n")
-                    model.train()
-
-            #     start_logits, end_logits, has_ans, gen_scores = model(input_ids=input_ids,
-            #                                                           token_type_ids=segment_ids,
-            #                                                           state_positions=state_position_ids,
-            #                                                           attention_mask=input_mask,
-            #                                                           slot_mask=slot_mask,
-            #                                                           max_value=max_value,
-            #                                                           op_ids=op_ids,
-            #                                                           max_update=max_update)
-            #     start_predictions += start_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-            #     end_predictions += end_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-            #     has_ans_predictions += pred_ops.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-            #     # has_ans_predictions+=pred_ops.view(-1).cpu().detach().numpy().tolist()
-            #     gen_predictions += gen_scores.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
-            #     start_ids += start_idx.view(-1).cpu().detach().numpy().tolist()
-            #     end_ids += end_idx.view(-1).cpu().detach().numpy().tolist()
-            #     has_ans_labels += op_ids.view(-1).cpu().detach().numpy().tolist()
-            #     gen_labels += slot_ans_ids.view(-1).cpu().detach().numpy().tolist()
-            #
-            # gen_acc, op_acc, op_prec, op_recall, op_F1 = op_evaluation(start_predictions, end_predictions,
-            #                                                            gen_predictions, has_ans_predictions,
-            #                                                            start_ids, end_ids, gen_labels,
-            #                                                            has_ans_labels)
-            # # eval_res = model_evaluation(model, dev_data_raw, tokenizer, slot_meta, epoch + 1, args.op_code)
-            # file_logger.log(
-            #     "{}\t{:.6f}\t{:.6f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}".format(epoch, loss, gen_acc,
-            #                                                                                         op_acc,
-            #                                                                                         op_prec, op_recall,
-            #                                                                                         op_F1,
-            #                                                                                         max(gen_acc, best_score[
-            #                                                                                             'gen_acc']),
-            #                                                                                         max(op_acc, best_score[
-            #                                                                                             'op_acc']),
-            #                                                                                         max(op_F1, best_score[
-            #                                                                                             'op_F1'])))
-            # if op_F1 > best_score['op_F1']:
-            #     best_score['op_acc'] = op_acc
-            #     best_score['gen_acc'] = gen_acc
-            #     best_score['op_F1'] = op_F1
-            #     model_to_save = model.module if hasattr(model, 'module') else model
-            #     save_path = os.path.join(args.save_dir, 'model_best.bin')
-            #     torch.save(model_to_save.state_dict(), save_path)
-            #     file_logger.log("new best model saved at epoch {}: {:.2f}\t{:.2f}\t{:.2f}" \
-            #                     .format(epoch, gen_acc * 100, op_acc * 100, op_F1 * 100))
-            # print(
-            #     "Best Score : generate_accurate : %.3f, operation_accurate : %.3f,operation_precision : %.3f, operation_recall:%.3f,operation_F1 : %.3f" % (
-            #         gen_acc, op_acc, op_prec, op_recall, op_F1))
-            # print("\n")
-            # model.train()
+        # model.train()
+        # loss=0
+        sketchy_weight=0.35
+        verify_weight=0.65
+        #
+        # for epoch in range(args.n_epochs):
+        #     batch_loss = []
+        #     for step, batch in enumerate(train_dataloader):
+        #         batch = [b.to(device) if not isinstance(b, int) and not isinstance(b, list) else b for b in batch]
+        #         input_ids, input_mask, slot_mask, segment_ids, state_position_ids, op_ids, pred_ops, domain_ids, gen_ids, start_position, end_position, max_value, max_update, slot_ans_ids, start_idx, end_idx, sid = batch
+        #         batch_size = input_ids.shape[0]
+        #         seq_lens = input_ids.shape[1]
+        #         if rng.random() < args.decoder_teacher_forcing:  # teacher forcing
+        #             teacher = gen_ids
+        #         else:
+        #             teacher = None
+        #         batch_cate_mask = torch.BoolTensor(cate_mask).unsqueeze(0).repeat(input_ids.shape[0],1).cuda()
+        #
+        #         start_logits, end_logits, has_ans, gen_scores, _, _, _ = model(input_ids=input_ids,
+        #                                                                        token_type_ids=segment_ids,
+        #                                                                        state_positions=state_position_ids,
+        #                                                                        attention_mask=input_mask,
+        #                                                                        slot_mask=slot_mask,
+        #                                                                        max_value=max_value,
+        #                                                                        op_ids=op_ids,
+        #                                                                        max_update=max_update)
+        #         if turn == 0:
+        #             sample_mask = None
+        #             loss_ans = loss_fnc(has_ans.view(-1, len(op2id)), op_ids.view(-1))
+        #             # start_loss = loss_fnc(start_logits.view(-1,seq_lens),start_position.view(-1,seq_lens))
+        #             # end_loss = loss_fnc(end_logits.view(-1, seq_lens), end_position.view(-1,seq_lens))
+        #             loss_g = masked_cross_entropy_for_value(gen_scores.contiguous(),
+        #                                                     slot_ans_ids.contiguous(),
+        #                                                     sample_mask=sample_mask,
+        #                                                     slot_mask=None,
+        #                                                     )
+        #             loss_s = masked_cross_entropy_for_value(start_logits.contiguous(),
+        #                                                     start_idx.contiguous(),
+        #                                                     sample_mask=sample_mask,
+        #                                                     slot_mask=batch_cate_mask,
+        #                                                     pad_idx=-1
+        #                                                     )
+        #             loss_e = masked_cross_entropy_for_value(end_logits.contiguous(),
+        #                                                     end_idx.contiguous(),
+        #                                                     sample_mask=sample_mask,
+        #                                                     slot_mask=batch_cate_mask,
+        #                                                     pad_idx=-1)
+        #             #loss=loss_ans
+        #             # loss = 0.3 * loss_g + 0.15 * loss_s + 0.15 * loss_e
+        #             loss = 0.6 * loss_ans  + 0.1 * loss_s + 0.1 * loss_e
+        #             #loss = 0.4 * loss_ans
+        #             # weight_sum=0.4
+        #             # weight_sum=1
+        #             weight_sum = 0.6 + (loss_s != 0).float() * 0.1 + 0.1 * (
+        #                        loss_e != 0).float()
+        #         # weight_sum=(loss_g!=0).float()*0.3+(loss_s!=0).float()*0.15+0.15*(loss_e!=0).float()
+        #
+        #         elif turn == 1 or turn == 2:
+        #             if turn==1:
+        #                 sample_mask = (pred_ops.argmax(dim=-1) == 0)
+        #             else:
+        #                 sample_mask = (op_ids == 0)
+        #             #loss_ans = loss_fnc(pred_ops.view(-1, len(op2id)), op_ids.view(-1))
+        #             # start_loss = loss_fnc(start_logits.view(-1, seq_lens), start_position.view(-1, seq_lens))
+        #             # end_loss = loss_fnc(end_logits.view(-1, seq_lens), end_position.view(-1, seq_lens))
+        #
+        #             loss_g = masked_cross_entropy_for_value(gen_scores.contiguous(),
+        #                                                     slot_ans_ids.contiguous(),
+        #                                                     sample_mask=sample_mask
+        #                                                     )
+        #             loss_s = masked_cross_entropy_for_value(start_logits.contiguous(),
+        #                                                     start_idx.contiguous(),
+        #                                                     sample_mask=sample_mask,
+        #                                                     pad_idx=-1
+        #                                                     )
+        #             loss_e = masked_cross_entropy_for_value(end_logits.contiguous(),
+        #                                                     end_idx.contiguous(),
+        #                                                     sample_mask=sample_mask,
+        #                                                     pad_idx=-1)
+        #
+        #             loss = loss_g + loss_s + loss_e
+        #             # loss = 0.4 * loss_ans + 0.3 * loss_g + 0.15 * loss_s + 0.15 * loss_e
+        #             # weight_sum = 0.4 + (loss_g != 0).float() * 0.3 + (loss_s != 0).float() * 0.15 + 0.15 * (loss_e != 0).float()
+        #             weight_sum=1
+        #             # weight_sum = (loss_g != 0).float() * 0.3 + (loss_s != 0).float() * 0.15 + 0.15 * (
+        #             #             loss_e != 0).float()
+        #
+        #         loss = loss / weight_sum if weight_sum != 0 else loss
+        #         # loss=loss+start_loss+end_loss
+        #         batch_loss.append(loss.item())
+        #         loss.backward()
+        #         for par in model.parameters():
+        #             if par.grad is not None:
+        #                 if torch.isnan(par.grad.data).sum()!=0:
+        #                     par.grad.data=torch.where(torch.isnan(par.grad.data),torch.zeros_like(par.grad.data),par.grad.data)
+        #         torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+        #         enc_optimizer.step()
+        #         enc_scheduler.step()
+        #         # dec_optimizer.step()
+        #         # dec_scheduler.step()
+        #         model.zero_grad()
+        #         loss = loss.item()
+        #
+        #         if step % 100 == 0:
+        #             if args.exclude_domain is not True:
+        #                 print("[%d/%d] [%d/%d] mean_loss : %.3f" \
+        #                       % (epoch + 1, args.n_epochs, step,
+        #                          len(train_dataloader), np.mean(batch_loss)))
+        #             else:
+        #                 print("[%d/%d] [%d/%d] mean_loss : %.3f, state_loss : %.3f," \
+        #                       % (epoch + 1, args.n_epochs, step,
+        #                          len(train_dataloader), np.mean(batch_loss),
+        #                          loss.item()))
+        #             batch_loss = []
+        #         if (step + 1) % 1000 == 0:
+        #             model.eval()
+        #             start_predictions = []
+        #             start_ids = []
+        #             end_predictions = []
+        #             end_ids = []
+        #             has_ans_predictions = []
+        #             has_ans_labels = []
+        #             gen_predictions = []
+        #             gen_labels = []
+        #             score_diffs = []
+        #             cate_score_diffs=[]
+        #             score_noanses=[]
+        #             all_input_ids=[]
+        #             sample_ids=[]
+        #             for step, batch in enumerate(dev_dataloader):
+        #                 batch = [b.to(device) if not isinstance(b, int) and not isinstance(b, list) else b for b in
+        #                          batch]
+        #                 input_ids, input_mask, slot_mask, segment_ids, state_position_ids, op_ids, pred_ops, domain_ids, gen_ids, start_position, end_position, max_value, max_update, slot_ans_ids, start_idx, end_idx, sid = batch
+        #                 batch_size = input_ids.shape[0]
+        #                 seq_lens = input_ids.shape[1]
+        #                 if rng.random() < args.decoder_teacher_forcing:  # teacher forcing
+        #                     teacher = gen_ids
+        #                 else:
+        #                     teacher = None
+        #
+        #                 if turn == 0:
+        #                     start_logits, end_logits, has_ans, gen_scores, _, _, _ = model(input_ids=input_ids,
+        #                                                                                    token_type_ids=segment_ids,
+        #                                                                                    state_positions=state_position_ids,
+        #                                                                                    attention_mask=input_mask,
+        #                                                                                    slot_mask=slot_mask,
+        #                                                                                    max_value=max_value,
+        #                                                                                    op_ids=op_ids,
+        #                                                                                    max_update=max_update)
+        #                     start_predictions += start_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+        #                     end_predictions += end_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+        #                     has_ans_predictions += has_ans.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+        #                     # has_ans_predictions+=pred_ops.view(-1).cpu().detach().numpy().tolist()
+        #                     gen_predictions += gen_scores.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+        #                     start_ids += start_idx.view(-1).cpu().detach().numpy().tolist()
+        #                     end_ids += end_idx.view(-1).cpu().detach().numpy().tolist()
+        #                     has_ans_labels += op_ids.view(-1).cpu().detach().numpy().tolist()
+        #                     gen_labels += slot_ans_ids.view(-1).cpu().detach().numpy().tolist()
+        #                     all_input_ids += input_ids.cpu().detach().numpy().tolist()
+        #                     sample_ids+=sid
+        #
+        #                 elif turn == 1:
+        #                     start_logits, end_logits, has_ans, gen_scores, start_scores, end_scores, category_score = model(
+        #                         input_ids=input_ids,
+        #                         token_type_ids=segment_ids,
+        #                         state_positions=state_position_ids,
+        #                         attention_mask=input_mask,
+        #                         slot_mask=slot_mask,
+        #                         max_value=max_value,
+        #                         op_ids=op_ids,
+        #                         max_update=max_update)
+        #                     start_predictions += start_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+        #                     end_predictions += end_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+        #                     # has_ans_predictions += has_ans.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+        #                     has_ans_predictions += pred_ops.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+        #                     gen_predictions += gen_scores.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+        #                     start_ids += start_idx.view(-1).cpu().detach().numpy().tolist()
+        #                     end_ids += end_idx.view(-1).cpu().detach().numpy().tolist()
+        #                     has_ans_labels += op_ids.view(-1).cpu().detach().numpy().tolist()
+        #                     gen_labels += slot_ans_ids.view(-1).cpu().detach().numpy().tolist()
+        #                     all_input_ids += input_ids.cpu().detach().numpy().tolist()
+        #                     sample_ids+=sid
+        #                     joint_score = start_scores.unsqueeze(-2) + end_scores.unsqueeze(-1)
+        #                     triu_mask = np.triu(np.ones((joint_score.size(-1), joint_score.size(-1))))
+        #                     triu_mask[0, 1:] = 0
+        #                     triu_mask = (torch.Tensor(triu_mask) == 0).bool()
+        #                     joint_score = joint_score.masked_fill(triu_mask.unsqueeze(0).unsqueeze(0).cuda(),
+        #                                                           -1e9).masked_fill(
+        #                         slot_mask.unsqueeze(1).unsqueeze(-2) == 0, -1e9)
+        #                     joint_score = F.softmax(joint_score.view(joint_score.size(0), joint_score.size(1), -1),
+        #                                             dim=-1).view(joint_score.size(0), joint_score.size(1), seq_lens, -1)
+        #
+        #                     score_diff = (joint_score[:, :, 0, 0] - joint_score[:, :, 1:, 1:].max(dim=-1)[0].max(dim=-1)[
+        #                             0])
+        #                     score_noans = pred_ops[:, :, -1] - pred_ops[:, :, 0]
+        #
+        #                     slot_ans_mask = ans_vocab.sum(-1) != 0
+        #                     ans_idx = slot_ans_mask.sum(dim=-1) - 2
+        #                     neg_ans_mask = torch.cat((torch.linspace(0, ans_vocab.size(0) - 1,
+        #                                                              ans_vocab.size(0)).unsqueeze(0).long(),
+        #                                               ans_idx.unsqueeze(0)),
+        #                                              dim=0)
+        #                     neg_ans_mask = torch.sparse_coo_tensor(neg_ans_mask, torch.ones(ans_vocab.size(0)),
+        #                                                            (ans_vocab.size(0),
+        #                                                             ans_vocab.size(1))).to_dense().cuda()
+        #                     score_neg = gen_scores.masked_fill(neg_ans_mask.unsqueeze(0) == 0, -1e9).max(dim=-1)[0]
+        #                     score_has = gen_scores.masked_fill(neg_ans_mask.unsqueeze(0) == 1, -1e9).max(dim=-1)[0]
+        #                     cate_score_diff = score_neg - score_has
+        #                     score_diffs+=score_diff.view(-1).cpu().detach().numpy().tolist()
+        #                     cate_score_diffs+=cate_score_diff.view(-1).cpu().detach().numpy().tolist()
+        #                     score_noanses+=score_noans.view(-1).cpu().detach().numpy().tolist()
+        #
+        #
+        #                 elif turn == 2:
+        #                     start_logits, end_logits, has_ans, gen_scores, _, _, _ = model(input_ids=input_ids,
+        #                                                                                    token_type_ids=segment_ids,
+        #                                                                                    state_positions=state_position_ids,
+        #                                                                                    attention_mask=input_mask,
+        #                                                                                    slot_mask=slot_mask,
+        #                                                                                    max_value=max_value,
+        #                                                                                    op_ids=op_ids,
+        #                                                                                    max_update=max_update)
+        #                     start_predictions += start_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+        #                     end_predictions += end_logits.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+        #                     has_ans_predictions += pred_ops.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+        #                     # has_ans_predictions+=pred_ops.view(-1).cpu().detach().numpy().tolist()
+        #                     gen_predictions += gen_scores.argmax(dim=-1).view(-1).cpu().detach().numpy().tolist()
+        #                     start_ids += start_idx.view(-1).cpu().detach().numpy().tolist()
+        #                     end_ids += end_idx.view(-1).cpu().detach().numpy().tolist()
+        #                     has_ans_labels += op_ids.view(-1).cpu().detach().numpy().tolist()
+        #                     gen_labels += slot_ans_ids.view(-1).cpu().detach().numpy().tolist()
+        #                     all_input_ids += input_ids[:,1:].cpu().detach().numpy().tolist()
+        #                     sample_ids+=sid
+        #
+        #
+        #
+        #             if turn == 0 or turn == 2:
+        #                 gen_acc, op_acc, op_prec, op_recall, op_F1 = op_evaluation(start_predictions, end_predictions,
+        #                                                                            gen_predictions, has_ans_predictions,
+        #                                                                            start_ids, end_ids, gen_labels,
+        #                                                                            has_ans_labels,all_input_ids,ans_vocab_nd,score_diffs=None,cate_score_diffs=None,score_noanses=None,sketchy_weight=None,verify_weight=None,sid=sample_ids,catemask=cate_mask)
+        #             elif turn == 1:
+        #                 gen_acc, op_acc, op_prec, op_recall, op_F1= op_evaluation(start_predictions, end_predictions,
+        #                                                                            gen_predictions,has_ans_predictions,
+        #                                                                            start_ids, end_ids, gen_labels,
+        #                                                                            has_ans_labels,all_input_ids,ans_vocab_nd,score_diffs,cate_score_diffs,score_noanses,sketchy_weight,verify_weight,sample_ids)
+        #             print(gen_acc)
+        #             # scores = model_evaluation(model, dev_data_raw, tokenizer, slot_meta, 0, slot_ans=ontology,
+        #             #                           op_code=args.op_code, ans_vocab=ans_vocab_nd, cate_mask=cate_mask)
+        #
+        #
+        #             # eval_res = model_evaluation(model, dev_data_raw, tokenizer, slot_meta, epoch + 1, args.op_code)
+        #             file_logger.log(
+        #                 "{}\t{:.6f}\t{:.6f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}".format(epoch, loss,
+        #                                                                                                     gen_acc,
+        #                                                                                                     op_acc,
+        #                                                                                                     op_prec,
+        #                                                                                                     op_recall,
+        #                                                                                                     op_F1,
+        #                                                                                                     max(gen_acc,
+        #                                                                                                         best_score[
+        #                                                                                                             'gen_acc']),
+        #                                                                                                     max(op_acc,
+        #                                                                                                         best_score[
+        #                                                                                                             'op_acc']),
+        #                                                                                                     max(op_F1,
+        #                                                                                                         best_score[
+        #                                                                                                             'op_F1'])))
+        #             model_to_save = model.module if hasattr(model, 'module') else model
+        #             if turn == 1 or turn == 0:
+        #                 isbest = op_F1 > best_score['op_F1']
+        #                 saved_name = 'model_best_turn' + str(turn) + '.bin'
+        #             else:
+        #                 isbest = gen_acc > best_score['gen_acc']
+        #                 saved_name = 'model_best_generate.bin'
+        #             if isbest:
+        #                 best_score['op_acc'] = op_acc
+        #                 best_score['gen_acc'] = gen_acc
+        #                 best_score['op_F1'] = op_F1
+        #                 save_path = os.path.join(args.save_dir, saved_name)
+        #                 params = {
+        #                     'model': model_to_save.state_dict(),
+        #                     'optimizer': enc_optimizer.state_dict(),
+        #                     'scheduler': enc_scheduler.state_dict(),
+        #                     'args': args
+        #                 }
+        #                 torch.save(params, save_path)
+        #                 file_logger.log("new best model saved at epoch {}: {:.2f}\t{:.2f}\t{:.2f}" \
+        #                                 .format(epoch, gen_acc * 100, op_acc * 100, op_F1 * 100))
+        #             save_path = os.path.join(args.save_dir, 'checkpoint_epoch_' + str(epoch) + '.bin')
+        #             torch.save(model_to_save.state_dict(), save_path)
+        #             print(
+        #                 "Best Score : generate_accurate : %.3f, operation_accurate : %.3f,operation_precision : %.3f, operation_recall:%.3f,operation_F1 : %.3f" % (
+        #                     gen_acc, op_acc, op_prec, op_recall, op_F1))
+        #             print("\n")
+        #             model.train()
 
         # start_predictions = []
         # start_ids = []
@@ -1207,8 +1344,8 @@ def main():
         # gen_acc, op_acc,op_prec,op_recall,op_F1 = op_evaluation(start_predictions, end_predictions, gen_predictions, has_ans_predictions, start_ids,
         #                                end_ids, gen_labels, has_ans_labels,isopmask=False)
         # print(gen_acc)
-        #scores= model_evaluation(model, dev_data_raw, tokenizer, slot_meta, 0,slot_ans=ontology,op_code=args.op_code)
-
+        scores= model_evaluation(model, dev_data_raw, tokenizer, slot_meta, 0,slot_ans=ontology,op_code=args.op_code,ans_vocab=ans_vocab_nd,cate_mask=cate_mask)
+        #
         # if op_acc > best_score['op_acc']:
         #     best_score['op_acc'] = op_acc
         #     best_score['gen_acc'] = gen_acc
@@ -1228,8 +1365,9 @@ def main():
         # model.to(device)
 
         # score_ext_map = {}
-        # for batch in tqdm(train_dataloader, desc="Evaluating"):
-        #     model.eval()
+        # model.eval()
+        # for batch in tqdm(dev_dataloader, desc="Evaluating"):
+        #
         #     batch = [b.to(device) if not isinstance(b, int) and not isinstance(b, list) else b for b in batch]
         #     input_ids, input_mask, slot_mask, segment_ids, state_position_ids, op_ids,pred_ops, domain_ids, gen_ids, start_position, end_position, max_value, max_update, slot_ans_ids, start_idx, end_idx, sid = batch
         #     batch_size = input_ids.shape[0]
@@ -1239,7 +1377,7 @@ def main():
         #     else:
         #         teacher = None
         #
-        #     start_logits, end_logits, has_ans, gen_scores = model(input_ids=input_ids,
+        #     start_logits, end_logits, has_ans, gen_scores,_,_,_ = model(input_ids=input_ids,
         #                                                         token_type_ids=segment_ids,
         #                                                         state_positions=state_position_ids,
         #                                                         attention_mask=input_mask,
@@ -1251,7 +1389,7 @@ def main():
         #     score_ext = has_ans.cpu().detach().numpy().tolist()
         #     for i, sd in enumerate(score_ext):
         #         score_ext_map[sid[i]] = sd
-        # with open(os.path.join(args.output_dir, "cls_score_train.json"), "w") as writer:
+        # with open(os.path.join(args.output_dir, "cls_score_test_turn0.json"), "w") as writer:
         #     writer.write(json.dumps(score_ext_map, indent=4) + "\n")
 
 

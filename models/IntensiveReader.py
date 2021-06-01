@@ -8,22 +8,28 @@ import torch
 import torch.nn as nn
 # from transformers.modeling_bert import BertPreTrainedModel, BertModel
 from transformers.configuration_albert import AlbertConfig
+from transformers.configuration_bert import BertConfig
 from transformers.modeling_albert import AlbertModel
 import torch.nn.functional as F
 import math
 class IntensiveReader(nn.Module):
-    def __init__(self,args,n_op, n_domain, update_id,ans_vocab):
+    def __init__(self,args,n_op, n_domain, update_id,ans_vocab,slot_mm,turn=2):
         super(IntensiveReader,self).__init__()
         # self.hidden_size = config.hidden_size
-        albert_config = AlbertConfig.from_pretrained(args.model_name_or_path+"config.json")
+        # bert_config = AlbertConfig.from_pretrained(args.model_name_or_path+"config.json")
+        bert_config = BertConfig.from_pretrained(args.model_name_or_path + "config.json")
         args.slot_size=30
         args.ans_size=200
-        args.hidden_size=1024
+        args.hidden_size=bert_config.hidden_size
         args.n_slot = 30
+        self.n_slot=30
         self.args=args
-        self.albert = AlbertModel.from_pretrained(args.model_name_or_path+"pytorch_model.bin", config=albert_config)
+        self.slot_mm=slot_mm
+        self.turn=turn
+        self.albert = AlbertModel.from_pretrained(args.model_name_or_path+"pytorch_model.bin", config=bert_config)
         self.albert.resize_token_embeddings(args.vocab_size)
         self.decoder = Decoder(args, 500)
+        self.input_drop=nn.Dropout(p=0.5)
         #self.encoder = Encoder(config, n_op, n_domain, update_id, args.exclude_domain)
         #
         #
@@ -31,17 +37,25 @@ class IntensiveReader(nn.Module):
         # self.apply(self.init_weights)
 
         smask=ans_vocab.sum(dim=-1).eq(0).long()
+        smask=slot_mm.long().mm(smask)
+        self.slot_mm=nn.Parameter(slot_mm,requires_grad=False)
         self.slot_ans_mask=nn.Parameter(smask,requires_grad=False)
         self.ans_vocab = nn.Parameter(torch.FloatTensor(ans_vocab.size(0), ans_vocab.size(1), args.hidden_size),
                                       requires_grad=True)
+        self.max_ans_size = ans_vocab.size(-1)
+        self.slot_ans_size = ans_vocab.size(1)
+        self.eslots = ans_vocab.size(0)
         self.ans_bias = nn.Parameter(torch.FloatTensor(ans_vocab.size(0), ans_vocab.size(1), 1),requires_grad=True)
         self.pos_weight=nn.Parameter(torch.FloatTensor([1]),requires_grad=True)
         self.pos_bias = nn.Parameter(torch.FloatTensor([0]), requires_grad=True)
-        self.hidden_size = albert_config.hidden_size
+        self.hidden_size = bert_config.hidden_size
         self.exclude_domain = args.exclude_domain
-        self.dropout = nn.Dropout(albert_config.classifier_dropout_prob)
+        self.dropout = nn.Dropout(bert_config.hidden_dropout_prob)
         self.action_cls = nn.Linear(self.hidden_size, n_op)
-        self.has_ans1 = nn.Sequential(nn.Dropout(p=albert_config.hidden_dropout_prob), nn.Linear(self.hidden_size, 2))
+        if turn!=2:
+            self.has_ans1 = nn.Linear(self.hidden_size, 2)
+            # self.has_ans1_global = nn.Parameter(torch.FloatTensor(bert_config.hidden_size, 30, 2),requires_grad=True)
+            # self.has_ans1_local = nn.Linear(bert_config.hidden_size, 2)
         if self.exclude_domain is not True:
             self.domain_cls = nn.Linear(self.hidden_size, n_domain)
         self.n_op = n_op
@@ -53,16 +67,17 @@ class IntensiveReader(nn.Module):
 
         torch.nn.init.xavier_normal_(self.ans_bias)
         torch.nn.init.xavier_normal_(self.ans_vocab)
-
+        self.layernorm=torch.nn.LayerNorm(self.hidden_size)
         # self.init_ans_vocab(ans_vocab)
 
     def init_ans_vocab(self,ans_vocab):
         slot_ans_size = ans_vocab.size(1)
         init_vocab = nn.Parameter(torch.FloatTensor(self.args.slot_size, slot_ans_size, self.args.hidden_size),
                                        requires_grad=True)
-        max_ans_size=ans_vocab.size(-1)
-        slot_ans_size=ans_vocab.size(1)
-        ans_vocab=ans_vocab.reshape((-1,max_ans_size))
+        self.max_ans_size=ans_vocab.size(-1)
+        self.slot_ans_size=ans_vocab.size(1)
+        self.eslots=ans_vocab.size(0)
+        ans_vocab=ans_vocab.reshape((-1,self.max_ans_size))
         attention_mask=(ans_vocab!=0)
         token_type_ids=torch.zeros_like(ans_vocab)
         ans_vocab_batches=ans_vocab.split(10)
@@ -95,11 +110,12 @@ class IntensiveReader(nn.Module):
         sequence_output, pooled_output = enc_outputs[:2]
         state_pos = state_positions[:, :, None].expand(-1, -1, sequence_output.size(-1))
         state_output = torch.gather(sequence_output, 1, state_pos)
+        sequence_output=self.input_drop(sequence_output)
         # state_scores = self.action_cls(self.dropout(state_output))  # B,J,4
-        if self.exclude_domain:
-            domain_scores = torch.zeros(1, device=input_ids.device)  # dummy
-        else:
-            domain_scores = self.domain_cls(self.dropout(pooled_output))
+        # if self.exclude_domain:
+        #     domain_scores = torch.zeros(1, device=input_ids.device)  # dummy
+        # else:
+        #     domain_scores = self.domain_cls(self.dropout(pooled_output))
 
         # batch_size = state_scores.size(0)
         # if op_ids is None:
@@ -108,9 +124,11 @@ class IntensiveReader(nn.Module):
         #     max_update = op_ids.eq(self.update_id).sum(-1).max().item()
 
         seq_len=sequence_output.size(1)
+        # batch_size=sequence_output.size(0)
+        # state_mask=(torch.linspace(0,seq_len-1,seq_len).unsqueeze(0).repeat(batch_size,1).long().cuda()>=(state_pos[:,0,0].unsqueeze(-1)))
 
         state_output=state_output.view(-1,1,self.hidden_size)
-        decoder_input = []
+        # decoder_input = []
         # for b, a in zip(state_output, op_ids.eq(self.update_id)):  # update
         #     if a.sum().item() != 0:
         #         v = b.masked_select(a.unsqueeze(-1)).view(1, -1, self.hidden_size)
@@ -125,23 +143,38 @@ class IntensiveReader(nn.Module):
         #span-based answer generating
         start_output=self.start_output(sequence_output)
         end_output=self.end_output(sequence_output)
-        start_atten_m = state_output.bmm(start_output.repeat(self.args.n_slot,1,1).transpose(-1,-2)).view(-1,self.args.n_slot,seq_len)/math.sqrt(self.hidden_size)
-        end_atten_m = state_output.bmm(end_output.repeat(self.args.n_slot,1,1).transpose(-1,-2)).view(-1,self.args.n_slot,seq_len)/math.sqrt(self.hidden_size)
-        start_atten_m = self.pos_weight*start_atten_m+self.pos_bias
-        end_atten_m=self.pos_weight*end_atten_m+self.pos_bias
+        start_output=self.layernorm(start_output)
+        end_output=self.layernorm(end_output)
+        start_atten_m = state_output.view(-1,self.args.n_slot,self.hidden_size).bmm(start_output.transpose(-1,-2)).view(-1,self.args.n_slot,seq_len)/math.sqrt(self.hidden_size)
+        end_atten_m = state_output.view(-1,self.args.n_slot,self.hidden_size).bmm(end_output.transpose(-1,-2)).view(-1,self.args.n_slot,seq_len)/math.sqrt(self.hidden_size)
+        # start_atten_m = self.pos_weight*start_atten_m+self.pos_bias
+        # end_atten_m=self.pos_weight*end_atten_m+self.pos_bias
+        # start_atten_m=torch.min(start_atten_m,5)
+        # end_atten_m=torch.min(end_atten_m,5)
+
         start_logits =start_atten_m.masked_fill(slot_mask.unsqueeze(1)==0,-1e9)
         end_logits = end_atten_m.masked_fill(slot_mask.unsqueeze(1)==0,-1e9)
-        start_logits_softmax =F.softmax(start_logits[:,:,1:],dim=-1)
-        end_logits_softmax =F.softmax(end_logits[:,:,1:],dim=-1)
+        if self.turn==2:
+            start_logits_softmax =F.softmax(start_logits[:,:,1:],dim=-1)
+            end_logits_softmax =F.softmax(end_logits[:,:,1:],dim=-1)
+        else:
+            start_logits_softmax = F.softmax(start_logits, dim=-1)
+            end_logits_softmax = F.softmax(end_logits, dim=-1)
 
         #intensive answer verification
-        ques_attn=F.softmax(sequence_output.repeat(self.args.n_slot,1,1).bmm(state_output.transpose(-1,-2)),dim=1)
+        # sequence_output=sequence_output.masked_fill(state_mask.unsqueeze(-1),0)
+        # ques_attn=F.softmax(sequence_output.repeat(self.args.n_slot,1,1).bmm(state_output.transpose(-1,-2))/math.sqrt(self.hidden_size),dim=1)
+
+        ques_attn=F.softmax((sequence_output.repeat(self.args.n_slot,1,1).bmm(state_output.transpose(-1,-2))/math.sqrt(self.hidden_size)).masked_fill(slot_mask.repeat(self.args.n_slot,1).unsqueeze(-1)==0,-1e9),dim=1)
         sequence_pool_output=ques_attn.transpose(-1,-2).bmm(sequence_output.repeat(self.args.n_slot,1,1)).squeeze()
-        has_ans=self.has_ans1(sequence_pool_output).view(-1,self.args.n_slot,2)
+        if self.turn==2:
+            has_ans=torch.Tensor([1]).cuda()
+        else:
+            has_ans=self.has_ans1(sequence_pool_output).view(-1,self.args.n_slot,2)
 
         #category answer generating
         sequence_pool_output=sequence_pool_output.view(-1,self.args.n_slot,self.hidden_size)
-        category_ans=sequence_pool_output.transpose(0,1).bmm(self.ans_vocab.transpose(-1,-2))+self.ans_bias.transpose(-1,-2)
+        category_ans=sequence_pool_output.transpose(0,1).bmm(self.slot_mm.mm(self.ans_vocab.view(self.eslots,-1)).view(self.n_slot,self.slot_ans_size,-1).transpose(-1,-2))+self.slot_mm.mm(self.ans_bias.squeeze()).unsqueeze(1)
         category_ans=category_ans.transpose(0,1)
         category_ans=category_ans.masked_fill((self.slot_ans_mask==1).unsqueeze(0),-1e9)
         category_ans_softmax=F.softmax(category_ans,dim=-1)
@@ -150,6 +183,8 @@ class IntensiveReader(nn.Module):
         return start_logits_softmax, end_logits_softmax, has_ans,category_ans_softmax, start_logits, end_logits, category_ans
         #return start_logits_softmax,end_logits_softmax,torch.Tensor(1).cuda(),category_ans_softmax,start_logits,end_logits,category_ans
 
+    def tensorisnan(self,input):
+        return torch.isnan(input).sum()==0
 
 # class Encoder(nn.Module):
 #     def __init__(self, config, n_op, n_domain, update_id, exclude_domain=False):

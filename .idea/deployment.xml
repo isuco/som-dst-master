@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="h6">
+  <component name="PublishConfigData" autoUpload="Always" serverName="Copy of project-level server 'h6'">
     <serverData>
       <paths name="105">
         <serverdata>
@@ -12,7 +12,7 @@
       <paths name="Copy of project-level server '10.109.246.108'">
         <serverdata>
           <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/som-dst-master" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
@@ -26,14 +26,14 @@
       <paths name="Copy of project-level server 'h6'">
         <serverdata>
           <mappings>
-            <mapping deploy="gjy/DST/som-dst-master/som-dst-master" local="$PROJECT_DIR$" />
+            <mapping deploy="/som-dst-master" local="$PROJECT_DIR$" />
           </mappings>
         </serverdata>
       </paths>
       <paths name="Copy of project-level server 'h6' (1)">
         <serverdata>
           <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/home/lijijie/som-dst-master" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
@@ -75,7 +75,7 @@
       <paths name="lab108">
         <serverdata>
           <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/home/lijijie/som-dst-master" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>

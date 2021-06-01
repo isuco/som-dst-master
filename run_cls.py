@@ -633,7 +633,7 @@ def main():
 
     ontology = json.load(open(args.data_root+args.ontology_data))
 
-    slot_meta, slot_ans_wh = make_slot_meta(ontology)
+    _, slot_meta = make_slot_meta(ontology)
 
 
     op2id = OP_SET[args.op_code]
